@@ -1,0 +1,7 @@
+certs/
+*.pfx
+*.p12
+.env
+__pycache__/
+*.db
+.venv/

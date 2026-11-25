@@ -1,0 +1,4599 @@
+# ESTRUTURA DO PROJETO
+
+nfe_monitor/
+        config.json
+        config.json
+        config.json
+        config.json
+        config.json
+    cabecalhos.txt
+    envia_soap_req.txt
+    envia_soap_resposta.txt
+main.py
+    __init__.py
+        __init__.py
+        baixar_xml.py
+        empresas.py
+        limite.py
+        listar_notas.py
+        sincronizar.py
+        __init__.py
+        certificado.py
+        nota.py
+        resumo.py
+        __init__.py
+        brasilapi.py
+        certificados.py
+            __init__.py
+            conexao.py
+            notas_repository.py
+        paths.py
+        preferencias.py
+            __init__.py
+            cliente.py
+            distribuicao.py
+            manifestacao.py
+            parametros.py
+        __init__.py
+        formatters.py
+            __init__.py
+            notas_model.py
+            Main.txt
+            catalog.py
+            theme.py
+            theme_manager.py
+            __init__.py
+            config_viewmodel.py
+            main_viewmodel.py
+            notas_model.py
+pytest.ini
+README.md
+requirements.txt
+    __init__.py
+    test_conexao.py
+    test_distribuicao.py
+    test_empresas.py
+    test_notas_repository.py
+    test_sincronizar.py
+    teste_certificados.py
+    teste_distribuicao_hom.py
+    teste_distribuicao_ps.py
+    gerar_snapshot.py
+
+# CONTEÚDO DOS ARQUIVOS
+
+
+================================================================================
+ARQUIVO: .pytest_tmp/test_aviso_de_vencimento0/config.json
+================================================================================
+{
+  "thumbprint": "ABC123",
+  "pasta_download": "",
+  "ultima_sincronizacao": ""
+}
+
+================================================================================
+ARQUIVO: .pytest_tmp/test_cadastro_completo_com_bra0/config.json
+================================================================================
+{
+  "thumbprint": "ABC123",
+  "pasta_download": "",
+  "ultima_sincronizacao": ""
+}
+
+================================================================================
+ARQUIVO: .pytest_tmp/test_recadastro_atualiza0/config.json
+================================================================================
+{
+  "thumbprint": "NOVO",
+  "pasta_download": "",
+  "ultima_sincronizacao": ""
+}
+
+================================================================================
+ARQUIVO: .pytest_tmp/test_sem_brasilapi_usa_certifi0/config.json
+================================================================================
+{
+  "thumbprint": "ABC123",
+  "pasta_download": "",
+  "ultima_sincronizacao": ""
+}
+
+================================================================================
+ARQUIVO: .pytest_tmp/test_uf_informada_dispensa_api0/config.json
+================================================================================
+{
+  "thumbprint": "ABC123",
+  "pasta_download": "",
+  "ultima_sincronizacao": ""
+}
+
+================================================================================
+ARQUIVO: logs/cabecalhos.txt
+================================================================================
+﻿URL=https://www1.nfe.fazenda.gov.br/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx
+CT=application/soap+xml; charset=utf-8; action="http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse"
+SOAPAction=http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse
+
+
+================================================================================
+ARQUIVO: logs/envia_soap_req.txt
+================================================================================
+URL: https://www1.nfe.fazenda.gov.br/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx
+SoapAction (parametro): http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse
+Content-Type: application/soap+xml; charset=utf-8; action="http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse"
+SOAPAction header: "http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse"
+
+================================================================================
+ARQUIVO: logs/envia_soap_resposta.txt
+================================================================================
+HTTP 200
+
+
+
+================================================================================
+ARQUIVO: main.py
+================================================================================
+import sys
+
+from PySide6.QtCore import QCoreApplication, QUrl
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuickControls2 import QQuickStyle
+
+from nfe_monitor.infrastructure.paths import recurso
+from nfe_monitor.ui.themes.theme_manager import ThemeManager
+from nfe_monitor.ui.viewmodels.config_viewmodel import ConfigViewModel
+from nfe_monitor.ui.viewmodels.main_viewmodel import MainViewModel
+
+
+def main() -> int:
+    QCoreApplication.setOrganizationName("NFeMonitor")
+    QCoreApplication.setApplicationName("NF-e Monitor")
+    QQuickStyle.setStyle("Basic")  # personalização total dos controles
+
+    app = QGuiApplication(sys.argv)
+    engine = QQmlApplicationEngine()
+
+    tema = ThemeManager(app)
+    view_model = MainViewModel()
+    config = ConfigViewModel()
+    config.salvo.connect(view_model.atualizarCertificado)
+
+    ctx = engine.rootContext()
+    ctx.setContextProperty("Theme", tema)
+    ctx.setContextProperty("viewModel", view_model)
+    ctx.setContextProperty("config", config)
+
+    engine.load(QUrl.fromLocalFile(str(recurso("nfe_monitor/ui/qml/Main.qml"))))
+    if not engine.rootObjects():
+        return 1
+
+    codigo = app.exec()
+    del engine  # destrói o QML antes dos view models
+    return codigo
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+
+================================================================================
+ARQUIVO: nfe_monitor/__init__.py
+================================================================================
+
+
+================================================================================
+ARQUIVO: nfe_monitor/application/__init__.py
+================================================================================
+
+
+================================================================================
+ARQUIVO: nfe_monitor/application/baixar_xml.py
+================================================================================
+import logging
+import shutil
+from datetime import datetime
+from pathlib import Path
+
+from nfe_monitor.domain.resumo import FUSO
+from nfe_monitor.infrastructure.database import notas_repository as repo
+from nfe_monitor.infrastructure.database.conexao import conectar
+from nfe_monitor.infrastructure.paths import CNPJ, PASTA_XML
+from nfe_monitor.infrastructure.sefaz import cliente, distribuicao
+from nfe_monitor.infrastructure.sefaz.manifestacao import (
+    CSTAT_DUPLICIDADE, CSTATS_CIENCIA_OK, ErroEvento, enviar_ciencia,
+)
+from nfe_monitor.infrastructure.sefaz.parametros import Config
+
+__all__ = [
+    "ErroEvento", "manifestar_ciencia", "baixar_xml_completo", "obter_xml",
+    "caminho_livre", "baixar_e_copiar",
+]
+
+log = logging.getLogger("nfe_monitor")
+
+
+def manifestar_ciencia(con, cnpj: str, chave: str, cfg: Config) -> None:
+    inicio = datetime.now(FUSO)
+    try:
+        cstat, motivo = enviar_ciencia(chave, cnpj, cfg)
+    except Exception as e:
+        with con:
+            repo.registrar_operacao(con, "ciencia", chave, inicio, "erro", str(e))
+        raise
+
+    if cstat in CSTATS_CIENCIA_OK or cstat == CSTAT_DUPLICIDADE:
+        with con:
+            repo.atualizar_manifestacao(con, chave, "ciencia")
+            repo.registrar_operacao(con, "ciencia", chave, inicio, "ok", f"{cstat} {motivo}")
+        log.info("Ciência registrada para %s: %s %s", chave, cstat, motivo)
+        return
+
+    with con:
+        repo.registrar_operacao(con, "ciencia", chave, inicio, "erro", f"{cstat} {motivo}")
+    raise ErroEvento(f"A SEFAZ recusou a ciência: {cstat} - {motivo}")
+
+
+def baixar_xml_completo(con, cnpj: str, chave: str, cfg: Config) -> Path:
+    inicio = datetime.now(FUSO)
+    try:
+        corpo = cliente.consultar_chave(cnpj, chave, cfg)
+        lote = distribuicao.ler_lote(corpo, exigir_nsu=False)
+
+        if lote.cstat == distribuicao.CSTAT_ESPERA:
+            raise ErroEvento(f"SEFAZ pediu espera (656): {lote.motivo}")
+        if lote.cstat not in (distribuicao.CSTAT_SEM_DOCS, distribuicao.CSTAT_COM_DOCS):
+            raise ErroEvento(f"SEFAZ respondeu cStat {lote.cstat}: {lote.motivo}")
+
+        for doc in lote.docs:
+            if doc.tipo != "completo":
+                continue
+            resumo = distribuicao.ler_completo(doc.xml)
+            if resumo.chave == chave:
+                with con:
+                    repo.salvar_completo(con, resumo, doc.xml, PASTA_XML)
+                    repo.registrar_operacao(con, "consulta_chave", chave, inicio, "ok",
+                                            f"{lote.cstat} {lote.motivo}")
+                return PASTA_XML / f"{chave}.xml"
+
+        raise ErroEvento(
+            "A SEFAZ não retornou o XML completo desta nota. "
+            f"Resposta: {lote.cstat} {lote.motivo}"
+        )
+    except Exception as e:
+        with con:
+            repo.registrar_operacao(con, "consulta_chave", chave, inicio, "erro", str(e))
+        raise
+
+
+def obter_xml(con, cnpj: str, chave: str, cfg: Config | None = None) -> Path:
+    """Fluxo completo para uma nota resumo: ciência (se preciso) e depois o XML completo."""
+    cfg = cfg or Config()
+    if not repo.tem_ciencia(con, chave):
+        manifestar_ciencia(con, cnpj, chave, cfg)
+    return baixar_xml_completo(con, cnpj, chave, cfg)
+
+
+def caminho_livre(pasta: Path, nome: str) -> Path:
+    destino = pasta / nome
+    base, ext, n = destino.stem, destino.suffix, 1
+    while destino.exists():
+        destino = pasta / f"{base} ({n}){ext}"
+        n += 1
+    return destino
+
+
+def baixar_e_copiar(chave: str, pasta: Path) -> Path:
+    cfg = Config()
+    con = conectar(cfg.banco)
+    try:
+        origem = obter_xml(con, CNPJ, chave, cfg)
+    finally:
+        con.close()
+    destino = caminho_livre(pasta, f"{chave}.xml")
+    shutil.copy2(origem, destino)
+    return destino
+
+
+================================================================================
+ARQUIVO: nfe_monitor/application/empresas.py
+================================================================================
+import logging
+import sys
+from dataclasses import dataclass, field
+
+from nfe_monitor.application.sincronizar import cnpj_valido
+from nfe_monitor.infrastructure import brasilapi, certificados, preferencias
+from nfe_monitor.infrastructure.database import notas_repository as repo
+from nfe_monitor.infrastructure.database.conexao import UF_CODIGO, conectar
+from nfe_monitor.infrastructure.sefaz.parametros import Config
+
+__all__ = ["DIAS_AVISO", "ErroCadastro", "Cadastro", "cadastrar_por_certificado"]
+
+log = logging.getLogger("nfe_monitor")
+
+DIAS_AVISO = 30
+
+
+class ErroCadastro(ValueError):
+    """Certificado inadequado para cadastrar a empresa (mostrado ao usuário)."""
+
+
+@dataclass
+class Cadastro:
+    empresa: repo.Empresa
+    nova: bool
+    avisos: list[str] = field(default_factory=list)
+
+
+def cadastrar_por_certificado(thumbprint: str, cfg: Config | None = None,
+                              uf: str | None = None, definir_padrao: bool = True) -> Cadastro:
+    """Cadastra (ou atualiza) a empresa do certificado. `uf` sobrepõe a BrasilAPI."""
+    thumbprint = thumbprint.strip().replace(" ", "").upper()
+    if not thumbprint:
+        raise ErroCadastro("Nenhum thumbprint informado nem salvo no config.json")
+    cert = next((c for c in certificados.listar() if c.thumbprint == thumbprint), None)
+    if cert is None:
+        raise ErroCadastro(f"Certificado {thumbprint} não encontrado no Windows")
+    if not cert.cnpj or not cnpj_valido(cert.cnpj):
+        raise ErroCadastro("O certificado não é um e-CNPJ válido")
+    if cert.vencido:
+        raise ErroCadastro(f"Certificado vencido em {cert.validade:%d/%m/%Y}")
+
+    avisos = []
+    if not cert.tem_chave:
+        avisos.append("Windows não informou chave privada (token A3 desconectado?)")
+    if cert.dias_restantes <= DIAS_AVISO:
+        avisos.append(f"O certificado vence em {cert.dias_restantes} dia(s) "
+                      f"({cert.validade:%d/%m/%Y})")
+
+    if uf is not None:
+        uf = uf.strip().upper()
+        if uf not in UF_CODIGO:
+            raise ErroCadastro(f"UF inválida: {uf}")
+
+    cfg = cfg or Config()
+    con = conectar(cfg.banco)
+    try:
+        existente = repo.obter_empresa(con, cert.cnpj)
+        api = {} if uf else (brasilapi.consultar_cnpj(cert.cnpj) or {})
+        if not uf and not api:
+            avisos.append("BrasilAPI indisponível: dados tirados do certificado")
+
+        uf_api = api.get("uf") if api.get("uf") in UF_CODIGO else None
+        uf_final = uf or uf_api or (existente.uf if existente else None)
+        if not uf_final:
+            avisos.append("UF não identificada: informe com --uf para liberar a consulta")
+
+        empresa = repo.Empresa(
+            cnpj=cert.cnpj,
+            razao_social=api.get("razao_social") or cert.nome
+                         or (existente.razao_social if existente else None),
+            uf=uf_final,
+            thumbprint=cert.thumbprint,
+            origem="windows",
+            ativo=True,
+        )
+        with con:
+            repo.salvar_empresa(con, empresa)
+    finally:
+        con.close()
+
+    if definir_padrao:
+        p = preferencias.carregar()
+        p.thumbprint = cert.thumbprint
+        preferencias.salvar(p)
+
+    return Cadastro(empresa, existente is None, avisos)
+
+
+def _ler_args(args: list[str]) -> tuple[str | None, str | None]:
+    """Separa (thumbprint, uf). Thumbprint ausente ou 'atual' = o do config.json."""
+    uf, posicionais, i = None, [], 0
+    while i < len(args):
+        if args[i] == "--uf" and i + 1 < len(args):
+            uf, i = args[i + 1], i + 2
+            continue
+        posicionais.append(args[i])
+        i += 1
+    thumb = posicionais[0] if posicionais else None
+    if thumb is None or thumb.lower() == "atual":
+        thumb = preferencias.carregar().thumbprint or None
+    return thumb, uf
+
+
+def _listar_certificados() -> int:
+    lista = certificados.listar()
+    atual = preferencias.carregar().thumbprint.upper()
+    if not lista:
+        print("Nenhum certificado encontrado em CurrentUser\\My nem LocalMachine\\My.")
+        print("  - Certificado A3: conecte o token/cartão e rode de novo.")
+        print("  - Certificado A1: importe o .pfx (duplo clique > Usuário atual).")
+        if atual:
+            print(f"  Thumbprint salvo no config.json: {atual}")
+        return 1
+    for i, c in enumerate(lista, 1):
+        marcas = []
+        if c.thumbprint == atual:
+            marcas.append("ATUAL")
+        if c.vencido:
+            marcas.append("VENCIDO")
+        elif c.dias_restantes <= DIAS_AVISO:
+            marcas.append("VENCE LOGO")
+        if not c.tem_chave:
+            marcas.append("SEM CHAVE")
+        extra = f" [{', '.join(marcas)}]" if marcas else ""
+        print(f"{i:>2}. {c.thumbprint}  {c.descricao}{extra}")
+    return 0
+
+
+def _main(argv: list[str]) -> int:
+    uso = ("Uso:\n"
+           "  python -m nfe_monitor.application.empresas certificados\n"
+           "  python -m nfe_monitor.application.empresas cadastrar [THUMBPRINT|atual] [--uf BA]\n"
+           "  python -m nfe_monitor.application.empresas listar")
+    if not argv:
+        print(uso)
+        return 1
+
+    comando, args = argv[0], argv[1:]
+    try:
+        if comando == "certificados":
+            return _listar_certificados()
+
+        if comando == "cadastrar":
+            thumb, uf = _ler_args(args)
+            res = cadastrar_por_certificado(thumb or "", uf=uf)
+            e = res.empresa
+            print(f"{'Cadastrada' if res.nova else 'Atualizada'}: "
+                  f"{e.cnpj} {e.razao_social or '(sem nome)'} ({e.uf or 'sem UF'})")
+            for a in res.avisos:
+                print(f"  Aviso: {a}")
+            return 0
+
+        if comando == "listar":
+            con = conectar(Config().banco)
+            try:
+                for e in repo.listar_empresas(con, somente_ativas=False):
+                    estado = "ativa" if e.ativo else "inativa"
+                    pronto = "ok" if e.completa else "incompleta"
+                    print(f"{e.cnpj}  {e.uf or '--'}  {estado:<7} {pronto:<10} "
+                          f"{e.razao_social or '(sem nome)'}")
+            finally:
+                con.close()
+            return 0
+    except (ErroCadastro, certificados.ErroCertificados) as e:
+        log.error("%s", e)
+        return 1
+
+    print(uso)
+    return 1
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    sys.exit(_main(sys.argv[1:]))
+
+
+================================================================================
+ARQUIVO: nfe_monitor/application/limite.py
+================================================================================
+from datetime import datetime, timedelta
+
+from nfe_monitor.domain.resumo import FUSO
+from nfe_monitor.infrastructure import preferencias
+
+INTERVALO = timedelta(hours=1)
+
+
+def ultima_sincronizacao() -> datetime | None:
+    texto = preferencias.carregar().ultima_sincronizacao
+    return datetime.fromisoformat(texto) if texto else None
+
+
+def segundos_restantes() -> int:
+    ultima = ultima_sincronizacao()
+    if ultima is None:
+        return 0
+    restante = (ultima + INTERVALO) - datetime.now(FUSO)
+    return max(0, int(restante.total_seconds()))
+
+
+def registrar_disparo() -> None:
+    """Grava o momento do clique. Vale também para sincronizações que falharam,
+    porque a SEFAZ conta cada consulta, mesmo as que dão erro."""
+    p = preferencias.carregar()
+    p.ultima_sincronizacao = datetime.now(FUSO).isoformat(timespec="seconds")
+    preferencias.salvar(p)
+
+
+================================================================================
+ARQUIVO: nfe_monitor/application/listar_notas.py
+================================================================================
+from nfe_monitor.infrastructure.database import notas_repository as repo
+from nfe_monitor.infrastructure.database.conexao import conectar
+from nfe_monitor.infrastructure.paths import DB
+
+__all__ = ["ITENS_POR_PAGINA", "consultar_notas"]
+
+ITENS_POR_PAGINA = 50
+
+
+def consultar_notas(fornecedor: str, inicio: str | None, fim: str | None,
+                    pagina: int, empresa_cnpj: str | None = None) -> tuple[list[dict], dict]:
+    """Consulta somente a página pedida e calcula as métricas dos filtros ativos.
+
+    empresa_cnpj vazio ou None = notas de todas as empresas.
+    """
+    con = conectar(DB)
+    try:
+        return repo.buscar_pagina(con, fornecedor, inicio, fim,
+                                  ITENS_POR_PAGINA, pagina * ITENS_POR_PAGINA,
+                                  empresa_cnpj or None)
+    finally:
+        con.close()
+
+
+================================================================================
+ARQUIVO: nfe_monitor/application/sincronizar.py
+================================================================================
+import logging
+import sys
+from dataclasses import dataclass, replace
+from datetime import datetime
+
+from nfe_monitor.domain.resumo import FUSO
+from nfe_monitor.infrastructure.database import notas_repository as repo
+from nfe_monitor.infrastructure.database.conexao import UF_CODIGO, conectar
+from nfe_monitor.infrastructure.paths import PASTA_XML
+from nfe_monitor.infrastructure.sefaz import cliente, distribuicao
+from nfe_monitor.infrastructure.sefaz.parametros import Config
+
+__all__ = [
+    "CSTATS_OK", "MINUTOS_FIM_FILA", "MINUTOS_656",
+    "EsperaSefaz", "CnpjInvalido", "Resultado",
+    "cnpj_valido", "sincronizar", "sincronizar_todas",
+]
+
+log = logging.getLogger("nfe_monitor")
+
+CSTATS_OK = (distribuicao.CSTAT_SEM_DOCS, distribuicao.CSTAT_COM_DOCS)
+MINUTOS_FIM_FILA = 60  # regra da SEFAZ: aguardar 1h ao zerar a fila
+MINUTOS_656 = 60
+
+
+class EsperaSefaz(RuntimeError):
+    """A SEFAZ pediu para aguardar (656) ou a empresa ainda está no intervalo de espera."""
+
+
+class CnpjInvalido(ValueError):
+    """CNPJ com dígito verificador errado ou não cadastrado."""
+
+
+@dataclass
+class Resultado:
+    cnpj: str
+    novas: int = 0
+    status: str = "ok"          # ok, espera ou erro
+    detalhe: str = ""
+
+
+def cnpj_valido(cnpj: str) -> bool:
+    """Confere formato e dígitos verificadores do CNPJ."""
+    if len(cnpj) != 14 or not cnpj.isdigit() or len(set(cnpj)) == 1:
+        return False
+
+    def dv(base: str) -> str:
+        pesos = list(range(len(base) - 7, 1, -1)) + list(range(9, 1, -1))
+        resto = sum(int(d) * p for d, p in zip(base, pesos)) % 11
+        return "0" if resto < 2 else str(11 - resto)
+
+    d1 = dv(cnpj[:12])
+    return cnpj[12:] == d1 + dv(cnpj[:12] + d1)
+
+
+def _config_da_empresa(e: repo.Empresa, cfg: Config) -> Config:
+    """Usa o certificado e a UF da empresa; o que faltar vem do Config atual."""
+    return replace(
+        cfg,
+        thumbprint=e.thumbprint or cfg.thumbprint,
+        uf_autor=UF_CODIGO[e.uf] if e.uf else cfg.uf_autor,
+    )
+
+
+def _processar_lote(con, cnpj: str, lote: distribuicao.Lote) -> int:
+    novas = 0
+    for doc in lote.docs:
+        if doc.tipo == "resumo":
+            if repo.inserir_resumo(con, distribuicao.ler_resumo(doc.xml), cnpj):
+                novas += 1
+        elif doc.tipo == "completo":
+            r = distribuicao.ler_completo(doc.xml)
+            if repo.salvar_completo(con, r, doc.xml, PASTA_XML, cnpj):
+                novas += 1
+    return novas
+
+
+def sincronizar(cnpj: str, cfg: Config | None = None, forcar: bool = False) -> int:
+    """Consulta a distribuição a partir do último NSU. Retorna quantas notas novas entraram."""
+    cnpj = "".join(c for c in cnpj if c.isdigit())
+    if not cnpj_valido(cnpj):
+        raise CnpjInvalido(f"CNPJ inválido: {cnpj or '(vazio)'}")
+
+    cfg = cfg or Config()
+    con = conectar(cfg.banco)
+    inicio = datetime.now(FUSO)
+    novas = 0
+    try:
+        empresa = repo.obter_empresa(con, cnpj)
+        if empresa is None:
+            raise CnpjInvalido(f"CNPJ {cnpj} não está cadastrado")
+        if not forcar and (ate := repo.bloqueada_ate(con, cnpj)):
+            raise EsperaSefaz(f"Aguardando a SEFAZ até {ate:%d/%m %H:%M}")
+
+        cfg_emp = _config_da_empresa(empresa, cfg)
+        ult = repo.ler_ult_nsu(con, cnpj)
+        log.info("Consultando %s a partir do NSU %s", cnpj, ult)
+
+        while True:
+            lote = distribuicao.ler_lote(cliente.consultar(cnpj, ult, cfg_emp))
+
+            if lote.cstat == distribuicao.CSTAT_ESPERA:
+                with con:
+                    ate = repo.bloquear_empresa(con, cnpj, MINUTOS_656)
+                    repo.registrar_operacao(con, "sincronizacao", None, inicio, "erro",
+                                            f"{cnpj}: 656 {lote.motivo}")
+                raise EsperaSefaz(f"{lote.motivo} (liberado às {ate:%H:%M})")
+            if lote.cstat not in CSTATS_OK:
+                raise RuntimeError(f"SEFAZ respondeu cStat {lote.cstat}: {lote.motivo}")
+
+            # Lote e NSU na mesma transação: se falhar no meio, nada é perdido.
+            with con:
+                novas += _processar_lote(con, cnpj, lote)
+                repo.salvar_ult_nsu(con, cnpj, lote.ult_nsu, lote.max_nsu)
+
+            log.info("Lote %s: cStat=%s, %d docs, NSU %s/%s",
+                     cnpj, lote.cstat, len(lote.docs), lote.ult_nsu, lote.max_nsu)
+
+            if lote.cstat == distribuicao.CSTAT_SEM_DOCS or lote.ult_nsu == lote.max_nsu:
+                with con:
+                    repo.bloquear_empresa(con, cnpj, MINUTOS_FIM_FILA)
+                break
+            if lote.ult_nsu == ult:  # NSU não avançou: evita laço infinito
+                break
+            ult = lote.ult_nsu
+
+        with con:
+            repo.registrar_operacao(con, "sincronizacao", None, inicio, "ok",
+                                    f"{cnpj}: {novas} novas")
+    except (EsperaSefaz, CnpjInvalido):
+        raise
+    except Exception as e:
+        with con:
+            repo.registrar_operacao(con, "sincronizacao", None, inicio, "erro",
+                                    f"{cnpj}: {e}"[:500])
+        raise
+    finally:
+        con.close()
+
+    return novas
+
+
+def sincronizar_todas(cfg: Config | None = None) -> list[Resultado]:
+    """Sincroniza todas as empresas ativas. Uma falha não interrompe as demais."""
+    cfg = cfg or Config()
+    con = conectar(cfg.banco)
+    try:
+        cnpjs = [e.cnpj for e in repo.listar_empresas(con)]
+    finally:
+        con.close()
+
+    resultados = []
+    for cnpj in cnpjs:
+        res = Resultado(cnpj)
+        try:
+            res.novas = sincronizar(cnpj, cfg)
+        except EsperaSefaz as e:
+            res.status, res.detalhe = "espera", str(e)
+        except Exception as e:
+            res.status, res.detalhe = "erro", str(e)
+            log.exception("Falha ao sincronizar %s", cnpj)
+        resultados.append(res)
+    return resultados
+
+
+def _main(argv: list[str]) -> int:
+    forcar = "--forcar" in argv
+    args = [a for a in argv if a != "--forcar"]
+
+    if len(args) > 1:
+        print("Uso: python -m nfe_monitor.application.sincronizar [CNPJ] [--forcar]")
+        return 1
+
+    if args:
+        try:
+            print(f"Notas novas: {sincronizar(args[0], forcar=forcar)}")
+            return 0
+        except CnpjInvalido as e:
+            log.error("%s", e)
+            return 1
+        except EsperaSefaz as e:
+            log.warning("SEFAZ pediu espera: %s", e)
+            return 2
+        except Exception as e:
+            log.error("Falha na sincronização: %s", e)
+            return 3
+
+    resultados = sincronizar_todas()
+    if not resultados:
+        print("Nenhuma empresa cadastrada.")
+        return 1
+    for r in resultados:
+        print(f"{r.cnpj}  {r.status:<7} novas={r.novas}  {r.detalhe}")
+    return 0 if all(r.status != "erro" for r in resultados) else 3
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    sys.exit(_main(sys.argv[1:]))
+
+
+================================================================================
+ARQUIVO: nfe_monitor/domain/__init__.py
+================================================================================
+
+
+================================================================================
+ARQUIVO: nfe_monitor/domain/certificado.py
+================================================================================
+from dataclasses import dataclass
+from datetime import datetime
+
+AVISO_DIAS = 30  # a partir de quantos dias para vencer o app começa a avisar
+
+__all__ = ["AVISO_DIAS", "Certificado"]
+
+
+@dataclass(frozen=True)
+class Certificado:
+    thumbprint: str
+    titular: str
+    validade: datetime
+
+    @property
+    def dias_restantes(self) -> int:
+        agora = datetime.now(self.validade.tzinfo)
+        return (self.validade.date() - agora.date()).days
+
+    @property
+    def vencido(self) -> bool:
+        return self.dias_restantes < 0
+
+    @property
+    def vencendo(self) -> bool:
+        return 0 <= self.dias_restantes <= AVISO_DIAS
+
+    @property
+    def situacao(self) -> str:
+        # usado em: "<titular> · <situacao> até dd/mm/aaaa"
+        if self.vencido:
+            return "vencido"
+        if self.vencendo:
+            return "vence"
+        return "válido"
+
+    @property
+    def rotulo(self) -> str:
+        return f"{self.titular} — {self.situacao} até {self.validade:%d/%m/%Y}"
+
+
+================================================================================
+ARQUIVO: nfe_monitor/domain/nota.py
+================================================================================
+def numero_da_nota(chave: str | None) -> str:
+    """Extrai o número da NF-e (posições 26 a 34 da chave de 44 dígitos)."""
+    chave = str(chave or "")
+    if len(chave) == 44 and chave.isdigit():
+        return chave[25:34].lstrip("0") or "0"
+    return "—"
+
+
+def situacao_da(nota: dict) -> str:
+    if nota["xml_baixado"]:
+        return "baixado"
+    if nota["manifestacao"] == "ciencia":
+        return "ciencia"
+    return "pendente"
+
+
+================================================================================
+ARQUIVO: nfe_monitor/domain/resumo.py
+================================================================================
+from dataclasses import dataclass
+from datetime import timedelta, timezone
+from decimal import Decimal
+
+# Bahia não usa horário de verão desde 2019. Offset fixo evita depender de tzdata no Windows.
+FUSO = timezone(timedelta(hours=-3))
+
+
+@dataclass(frozen=True)
+class Resumo:
+    chave: str
+    emitente_cnpj: str
+    emitente_nome: str
+    data_emissao: str
+    valor: Decimal
+    situacao: str
+    protocolo: str | None
+
+
+================================================================================
+ARQUIVO: nfe_monitor/infrastructure/__init__.py
+================================================================================
+
+
+================================================================================
+ARQUIVO: nfe_monitor/infrastructure/brasilapi.py
+================================================================================
+import json
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+
+__all__ = ["URL", "consultar_cnpj"]
+
+URL = "https://brasilapi.com.br/api/cnpj/v1/{cnpj}"
+
+
+def consultar_cnpj(cnpj: str, timeout: int = 10) -> dict | None:
+    """Devolve {'razao_social', 'uf'} ou None se a API falhar (o cadastro segue sem ela)."""
+    req = Request(URL.format(cnpj=cnpj), headers={"User-Agent": "nfe-monitor"})
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            dados = json.loads(resp.read().decode("utf-8"))
+    except (URLError, TimeoutError, OSError, ValueError):
+        return None
+    return {
+        "razao_social": (dados.get("razao_social") or "").strip() or None,
+        "uf": (dados.get("uf") or "").strip().upper() or None,
+    }
+
+
+================================================================================
+ARQUIVO: nfe_monitor/infrastructure/certificados.py
+================================================================================
+import base64
+import json
+import os
+import re
+import subprocess
+from dataclasses import dataclass
+from datetime import datetime
+
+__all__ = ["AVISO_DIAS", "Certificado", "ErroCertificados", "extrair_cnpj",
+           "listar", "selecionado", "validar_para_uso"]
+
+AVISO_DIAS = 30
+
+_SEM_JANELA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_CN_ECNPJ = re.compile(r"CN=([^,]*?):(\d{14})")
+_CN = re.compile(r"CN=([^,]+)")
+_QUATORZE = re.compile(r"(?<!\d)(\d{14})(?!\d)")
+
+# Usa X509Store direto: não depende da unidade Cert: (que falha no 5.1 aberto pelo pwsh 7).
+_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$lista = New-Object System.Collections.ArrayList
+foreach ($loja in 'CurrentUser', 'LocalMachine') {
+    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', $loja)
+    try {
+        $store.Open('ReadOnly, OpenExistingOnly')
+    } catch {
+        continue
+    }
+    foreach ($c in $store.Certificates) {
+        [void]$lista.Add([pscustomobject]@{
+            thumbprint = $c.Thumbprint
+            subject    = $c.Subject
+            validade   = $c.NotAfter.ToString('yyyy-MM-dd HH:mm:ss')
+            loja       = $loja
+            chave      = [bool]$c.HasPrivateKey
+        })
+    }
+    $store.Close()
+}
+ConvertTo-Json -InputObject @($lista) -Compress
+"""
+
+
+class ErroCertificados(RuntimeError):
+    """Falha ao ler o repositório de certificados do Windows."""
+
+
+@dataclass(frozen=True)
+class Certificado:
+    thumbprint: str
+    subject: str
+    validade: datetime
+    cnpj: str | None
+    nome: str | None
+    loja: str = "CurrentUser"
+    tem_chave: bool = True
+
+    @property
+    def dias_restantes(self) -> int:
+        return (self.validade - datetime.now()).days
+
+    @property
+    def vencido(self) -> bool:
+        return self.validade <= datetime.now()
+
+    @property
+    def titular(self) -> str:
+        if self.nome:
+            return self.nome
+        m = _CN.search(self.subject)
+        return m.group(1).strip() if m else self.subject
+
+    @property
+    def situacao(self) -> str:
+        return "Vencido" if self.vencido else "Válido"
+
+    @property
+    def descricao(self) -> str:
+        return (f"{self.titular} ({self.cnpj or 'sem CNPJ'}) - vence {self.validade:%d/%m/%Y}"
+                f" [{self.loja}]")
+
+
+def extrair_cnpj(subject: str) -> tuple[str | None, str | None]:
+    """Devolve (cnpj, nome) do subject. e-CNPJ usa 'CN=RAZAO SOCIAL:CNPJ'."""
+    m = _CN_ECNPJ.search(subject)
+    if m:
+        return m.group(2), m.group(1).strip() or None
+    m = _QUATORZE.search(subject)
+    return (m.group(1) if m else None), None
+
+
+def _ambiente_limpo() -> dict:
+    """Remove o PSModulePath herdado do PowerShell 7, que quebra o Windows PowerShell 5.1."""
+    env = dict(os.environ)
+    env.pop("PSModulePath", None)
+    return env
+
+
+def listar() -> list[Certificado]:
+    codificado = base64.b64encode(_SCRIPT.encode("utf-16-le")).decode("ascii")
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", codificado],
+            capture_output=True, timeout=30, creationflags=_SEM_JANELA, env=_ambiente_limpo(),
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ErroCertificados("Tempo esgotado ao listar certificados") from e
+
+    erro = r.stderr.decode("utf-8", errors="replace").strip()
+    if r.returncode != 0:
+        raise ErroCertificados(erro or f"PowerShell saiu com código {r.returncode}")
+
+    texto = r.stdout.decode("utf-8-sig", errors="replace").strip() or "[]"
+    try:
+        dados = json.loads(texto)
+    except json.JSONDecodeError as e:
+        raise ErroCertificados(f"Saída inesperada do PowerShell: {texto[:200]!r} {erro[:200]}") from e
+    if isinstance(dados, dict):
+        dados = [dados]
+
+    # Mesmo certificado nas duas lojas: fica o que tem chave privada.
+    unicos: dict[str, Certificado] = {}
+    for d in dados:
+        cnpj, nome = extrair_cnpj(d["subject"])
+        c = Certificado(
+            thumbprint=d["thumbprint"].upper(),
+            subject=d["subject"],
+            validade=datetime.strptime(d["validade"], "%Y-%m-%d %H:%M:%S"),
+            cnpj=cnpj,
+            nome=nome,
+            loja=d.get("loja", "CurrentUser"),
+            tem_chave=bool(d.get("chave", True)),
+        )
+        atual = unicos.get(c.thumbprint)
+        if atual is None or (c.tem_chave and not atual.tem_chave):
+            unicos[c.thumbprint] = c
+    return sorted(unicos.values(), key=lambda c: c.validade, reverse=True)
+
+
+def selecionado() -> Certificado | None:
+    """Certificado salvo no config.json, se ainda estiver instalado."""
+    from nfe_monitor.infrastructure import preferencias
+    thumb = preferencias.carregar().thumbprint.strip().upper()
+    if not thumb:
+        return None
+    return next((c for c in listar() if c.thumbprint == thumb), None)
+
+
+def validar_para_uso() -> Certificado:
+    cert = selecionado()
+    if cert is None:
+        raise ErroCertificados("Nenhum certificado configurado ou ele não está mais instalado. "
+                               "Abra as Configurações e selecione um.")
+    if cert.vencido:
+        raise ErroCertificados(f"O certificado venceu em {cert.validade:%d/%m/%Y}.")
+    return cert
+
+
+================================================================================
+ARQUIVO: nfe_monitor/infrastructure/database/__init__.py
+================================================================================
+
+
+================================================================================
+ARQUIVO: nfe_monitor/infrastructure/database/conexao.py
+================================================================================
+import sqlite3
+from pathlib import Path
+
+from nfe_monitor.infrastructure.sefaz.distribuicao import normalizar_data
+
+__all__ = ["SCHEMA", "UF_CODIGO", "conectar"]
+
+UF_CODIGO = {
+    "RO": "11", "AC": "12", "AM": "13", "RR": "14", "PA": "15", "AP": "16",
+    "TO": "17", "MA": "21", "PI": "22", "CE": "23", "RN": "24", "PB": "25",
+    "PE": "26", "AL": "27", "SE": "28", "BA": "29", "MG": "31", "ES": "32",
+    "RJ": "33", "SP": "35", "PR": "41", "SC": "42", "RS": "43", "MS": "50",
+    "MT": "51", "GO": "52", "DF": "53",
+}
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS empresas (
+    cnpj          TEXT PRIMARY KEY,
+    razao_social  TEXT,
+    uf            TEXT,              -- sigla; NULL até o cadastro ser completado
+    thumbprint    TEXT,              -- certificado no repositório do Windows
+    origem        TEXT NOT NULL DEFAULT 'windows',   -- 'windows' ou caminho do .pfx
+    ativo         INTEGER NOT NULL DEFAULT 1,
+    criado_em     TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE TABLE IF NOT EXISTS nfe (
+    chave              TEXT PRIMARY KEY,
+    empresa_cnpj       TEXT,            -- empresa monitorada que recebeu a nota
+    emitente_cnpj      TEXT NOT NULL,
+    emitente_nome      TEXT,
+    data_emissao       TEXT,            -- 'AAAA-MM-DD HH:MM:SS', horário de Brasília
+    valor              TEXT,            -- guardado como texto para preservar casas decimais
+    situacao           TEXT,            -- cSitNFe no resumo; cStat do protocolo no completo
+    protocolo          TEXT,
+    manifestacao       TEXT NOT NULL DEFAULT 'pendente',
+    caminho_xml        TEXT,            -- preenchido só quando o XML completo foi baixado
+    tipo               TEXT NOT NULL DEFAULT 'resumo',  -- 'resumo' ou 'completo'
+    criado_em          TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE TABLE IF NOT EXISTS controle_nsu (
+    cnpj           TEXT PRIMARY KEY,
+    ult_nsu        TEXT NOT NULL,
+    max_nsu        TEXT,
+    bloqueado_ate  TEXT,             -- 'AAAA-MM-DD HH:MM:SS'; preenchido após cStat 656
+    atualizado_em  TEXT
+);
+CREATE TABLE IF NOT EXISTS operacoes (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    tipo     TEXT NOT NULL,      -- sincronizacao, ciencia, consulta_chave, download_xml
+    chave    TEXT,               -- NULL em sincronizacao
+    inicio   TEXT NOT NULL,      -- 'AAAA-MM-DD HH:MM:SS', horário de Brasília
+    fim      TEXT NOT NULL,
+    status   TEXT NOT NULL,      -- ok ou erro
+    detalhe  TEXT                -- cStat e motivo, ou mensagem de erro
+);
+"""
+
+INDICES = """
+CREATE INDEX IF NOT EXISTS ix_nfe_empresa ON nfe(empresa_cnpj);
+"""
+
+
+def conectar(caminho: Path) -> sqlite3.Connection:
+    con = sqlite3.connect(caminho)
+    con.executescript(SCHEMA)
+    _migrar(con)
+    con.executescript(INDICES)
+    return con
+
+
+def _colunas(con: sqlite3.Connection, tabela: str) -> set[str]:
+    return {linha[1] for linha in con.execute(f"PRAGMA table_info({tabela})")}
+
+
+def _adicionar_coluna(con: sqlite3.Connection, tabela: str, definicao: str) -> None:
+    nome = definicao.split()[0]
+    if nome not in _colunas(con, tabela):
+        con.execute(f"ALTER TABLE {tabela} ADD COLUMN {definicao}")
+
+
+def _migrar(con: sqlite3.Connection) -> None:
+    """Atualiza bancos criados por versões anteriores. Seguro de executar sempre."""
+    _adicionar_coluna(con, "nfe", "tipo TEXT NOT NULL DEFAULT 'resumo'")
+    _adicionar_coluna(con, "nfe", "empresa_cnpj TEXT")
+    _adicionar_coluna(con, "controle_nsu", "max_nsu TEXT")
+    _adicionar_coluna(con, "controle_nsu", "bloqueado_ate TEXT")
+    _adicionar_coluna(con, "controle_nsu", "atualizado_em TEXT")
+
+    # Datas gravadas antes da normalização ainda têm 'T' e fuso.
+    antigas = con.execute(
+        "SELECT chave, data_emissao FROM nfe WHERE data_emissao LIKE '%T%'"
+    ).fetchall()
+    for chave, data in antigas:
+        con.execute(
+            "UPDATE nfe SET data_emissao = ? WHERE chave = ?",
+            (normalizar_data(data), chave),
+        )
+
+    # Todo CNPJ com NSU vira empresa (cadastro incompleto até a Etapa 2).
+    con.execute(
+        "INSERT OR IGNORE INTO empresas (cnpj) SELECT cnpj FROM controle_nsu"
+    )
+
+    # Banco de versão anterior com uma única empresa: as notas antigas são dela.
+    cnpjs = [linha[0] for linha in con.execute("SELECT cnpj FROM empresas")]
+    if len(cnpjs) == 1:
+        con.execute(
+            "UPDATE nfe SET empresa_cnpj = ? WHERE empresa_cnpj IS NULL", (cnpjs[0],)
+        )
+    con.commit()
+
+
+================================================================================
+ARQUIVO: nfe_monitor/infrastructure/database/notas_repository.py
+================================================================================
+import sqlite3
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from nfe_monitor.domain.resumo import FUSO, Resumo
+from nfe_monitor.infrastructure.database.conexao import UF_CODIGO
+
+__all__ = [
+    "NSU_ZERO", "Empresa",
+    "salvar_empresa", "obter_empresa", "listar_empresas", "desativar_empresa",
+    "ler_ult_nsu", "salvar_ult_nsu", "bloquear_empresa", "bloqueada_ate", "empresas_prontas",
+    "inserir_resumo", "salvar_completo", "registrar_operacao",
+    "atualizar_manifestacao", "tem_ciencia", "buscar_pagina",
+]
+
+NSU_ZERO = "0" * 15
+_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _agora() -> str:
+    return datetime.now(FUSO).strftime(_FMT)
+
+
+def _cursor(con: sqlite3.Connection) -> sqlite3.Cursor:
+    """Cursor com acesso por nome, sem alterar o row_factory da conexão."""
+    cur = con.cursor()
+    cur.row_factory = sqlite3.Row
+    return cur
+
+
+# ---------------------------------------------------------------- empresas
+@dataclass
+class Empresa:
+    cnpj: str
+    razao_social: str | None = None
+    uf: str | None = None
+    thumbprint: str | None = None
+    origem: str = "windows"
+    ativo: bool = True
+
+    @property
+    def completa(self) -> bool:
+        """Cadastro pronto para consultar a SEFAZ."""
+        return bool(self.uf and self.thumbprint)
+
+    @property
+    def c_uf_autor(self) -> str:
+        if not self.uf:
+            raise ValueError(f"Empresa {self.cnpj} sem UF cadastrada")
+        return UF_CODIGO[self.uf]
+
+
+def _para_empresa(r: sqlite3.Row) -> Empresa:
+    return Empresa(r["cnpj"], r["razao_social"], r["uf"], r["thumbprint"],
+                   r["origem"], bool(r["ativo"]))
+
+
+def salvar_empresa(con: sqlite3.Connection, e: Empresa) -> None:
+    if len(e.cnpj) != 14 or not e.cnpj.isdigit():
+        raise ValueError(f"CNPJ inválido: {e.cnpj}")
+    if e.uf is not None and e.uf not in UF_CODIGO:
+        raise ValueError(f"UF inválida: {e.uf}")
+    con.execute(
+        """INSERT INTO empresas (cnpj, razao_social, uf, thumbprint, origem, ativo)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(cnpj) DO UPDATE SET
+               razao_social = excluded.razao_social, uf = excluded.uf,
+               thumbprint = excluded.thumbprint, origem = excluded.origem,
+               ativo = excluded.ativo""",
+        (e.cnpj, e.razao_social, e.uf, e.thumbprint, e.origem, int(e.ativo)),
+    )
+    con.execute(
+        "INSERT OR IGNORE INTO controle_nsu (cnpj, ult_nsu, atualizado_em) VALUES (?, ?, ?)",
+        (e.cnpj, NSU_ZERO, _agora()),
+    )
+
+
+def obter_empresa(con: sqlite3.Connection, cnpj: str) -> Empresa | None:
+    r = _cursor(con).execute("SELECT * FROM empresas WHERE cnpj = ?", (cnpj,)).fetchone()
+    return _para_empresa(r) if r else None
+
+
+def listar_empresas(con: sqlite3.Connection, somente_ativas: bool = True) -> list[Empresa]:
+    sql = "SELECT * FROM empresas" + (" WHERE ativo = 1" if somente_ativas else "")
+    return [_para_empresa(r) for r in _cursor(con).execute(sql + " ORDER BY razao_social")]
+
+
+def desativar_empresa(con: sqlite3.Connection, cnpj: str) -> None:
+    """Para de monitorar sem apagar as notas já baixadas."""
+    con.execute("UPDATE empresas SET ativo = 0 WHERE cnpj = ?", (cnpj,))
+
+
+# ---------------------------------------------------------------- NSU e bloqueio
+def ler_ult_nsu(con: sqlite3.Connection, cnpj: str) -> str:
+    row = con.execute("SELECT ult_nsu FROM controle_nsu WHERE cnpj = ?", (cnpj,)).fetchone()
+    return row[0] if row else NSU_ZERO
+
+
+def salvar_ult_nsu(con: sqlite3.Connection, cnpj: str, nsu: str,
+                   max_nsu: str | None = None) -> None:
+    con.execute(
+        """INSERT INTO controle_nsu (cnpj, ult_nsu, max_nsu, atualizado_em) VALUES (?, ?, ?, ?)
+           ON CONFLICT(cnpj) DO UPDATE SET
+               ult_nsu       = excluded.ult_nsu,
+               max_nsu       = COALESCE(excluded.max_nsu, controle_nsu.max_nsu),
+               atualizado_em = excluded.atualizado_em""",
+        (cnpj, nsu.zfill(15), max_nsu.zfill(15) if max_nsu else None, _agora()),
+    )
+
+
+def bloquear_empresa(con: sqlite3.Connection, cnpj: str, minutos: int = 60) -> datetime:
+    """Chamar quando a SEFAZ retornar cStat 656 (consumo indevido)."""
+    ate = datetime.now(FUSO) + timedelta(minutes=minutos)
+    con.execute(
+        """INSERT INTO controle_nsu (cnpj, ult_nsu, bloqueado_ate) VALUES (?, ?, ?)
+           ON CONFLICT(cnpj) DO UPDATE SET bloqueado_ate = excluded.bloqueado_ate""",
+        (cnpj, NSU_ZERO, ate.strftime(_FMT)),
+    )
+    return ate
+
+
+def bloqueada_ate(con: sqlite3.Connection, cnpj: str) -> datetime | None:
+    """Retorna até quando a empresa está bloqueada, ou None se estiver livre."""
+    row = con.execute("SELECT bloqueado_ate FROM controle_nsu WHERE cnpj = ?", (cnpj,)).fetchone()
+    if not row or not row[0] or row[0] <= _agora():
+        return None
+    return datetime.strptime(row[0], _FMT).replace(tzinfo=FUSO)
+
+
+def empresas_prontas(con: sqlite3.Connection) -> list[Empresa]:
+    """Empresas ativas, com cadastro completo e fora do bloqueio."""
+    return [e for e in listar_empresas(con)
+            if e.completa and bloqueada_ate(con, e.cnpj) is None]
+
+
+# ---------------------------------------------------------------- notas
+def inserir_resumo(con: sqlite3.Connection, r: Resumo,
+                   empresa_cnpj: str | None = None) -> bool:
+    """Insere o resumo se a nota ainda não existir. Retorna True se foi nova."""
+    cur = con.execute(
+        """INSERT OR IGNORE INTO nfe
+           (chave, empresa_cnpj, emitente_cnpj, emitente_nome, data_emissao,
+            valor, situacao, protocolo, tipo)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'resumo')""",
+        (r.chave, empresa_cnpj, r.emitente_cnpj, r.emitente_nome, r.data_emissao,
+         str(r.valor), r.situacao, r.protocolo),
+    )
+    return cur.rowcount == 1
+
+
+def salvar_completo(con: sqlite3.Connection, r: Resumo, xml: str, pasta: Path,
+                    empresa_cnpj: str | None = None) -> bool:
+    """Grava o XML em disco e a nota no banco. Retorna True se a nota era nova."""
+    existia = con.execute("SELECT 1 FROM nfe WHERE chave = ?", (r.chave,)).fetchone() is not None
+
+    destino = pasta / empresa_cnpj if empresa_cnpj else pasta
+    destino.mkdir(parents=True, exist_ok=True)
+    caminho = destino / f"{r.chave}.xml"
+    caminho.write_text(xml, encoding="utf-8")
+
+    con.execute(
+        """INSERT INTO nfe (chave, empresa_cnpj, emitente_cnpj, emitente_nome, data_emissao,
+                            valor, situacao, protocolo, tipo, caminho_xml)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completo', ?)
+           ON CONFLICT(chave) DO UPDATE SET
+               tipo         = 'completo',
+               caminho_xml  = excluded.caminho_xml,
+               protocolo    = excluded.protocolo,
+               situacao     = excluded.situacao,
+               empresa_cnpj = COALESCE(nfe.empresa_cnpj, excluded.empresa_cnpj)""",
+        (r.chave, empresa_cnpj, r.emitente_cnpj, r.emitente_nome, r.data_emissao,
+         str(r.valor), r.situacao, r.protocolo, str(caminho)),
+    )
+    return not existia
+
+
+def registrar_operacao(con: sqlite3.Connection, tipo: str, chave: str | None,
+                       inicio: datetime, status: str, detalhe: str | None = None) -> None:
+    """Grava uma linha de controle de tempo. O commit fica a cargo de quem chama."""
+    con.execute(
+        """INSERT INTO operacoes (tipo, chave, inicio, fim, status, detalhe)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (tipo, chave, inicio.strftime(_FMT), _agora(), status, detalhe),
+    )
+
+
+def atualizar_manifestacao(con: sqlite3.Connection, chave: str, situacao: str) -> None:
+    con.execute("UPDATE nfe SET manifestacao = ? WHERE chave = ?", (situacao, chave))
+
+
+def tem_ciencia(con: sqlite3.Connection, chave: str) -> bool:
+    row = con.execute("SELECT manifestacao FROM nfe WHERE chave = ?", (chave,)).fetchone()
+    return row is not None and row[0] == "ciencia"
+
+
+# ---------------------------------------------------------------- consulta da tela
+def _condicoes(fornecedor: str, inicio: str | None, fim: str | None,
+               empresa_cnpj: str | None = None):
+    condicoes, parametros = [], []
+    if empresa_cnpj:
+        condicoes.append("empresa_cnpj = ?")
+        parametros.append(empresa_cnpj)
+    if fornecedor.strip():
+        condicoes.append("emitente_nome LIKE ?")
+        parametros.append(f"%{fornecedor.strip()}%")
+    if inicio:
+        condicoes.append("data_emissao >= ?")
+        parametros.append(f"{inicio} 00:00:00")
+    if fim:
+        condicoes.append("data_emissao <= ?")
+        parametros.append(f"{fim} 23:59:59")
+    where = f"WHERE {' AND '.join(condicoes)}" if condicoes else ""
+    return where, parametros
+
+
+def buscar_pagina(con: sqlite3.Connection, fornecedor: str, inicio: str | None,
+                  fim: str | None, limite: int, deslocamento: int,
+                  empresa_cnpj: str | None = None) -> tuple[list[dict], dict]:
+    """Retorna as notas da página e as métricas dos filtros ativos."""
+    where, parametros = _condicoes(fornecedor, inicio, fim, empresa_cnpj)
+    cur = _cursor(con)
+    notas = cur.execute(
+        f"""SELECT chave, empresa_cnpj, emitente_nome AS emitente, valor, data_emissao,
+                   manifestacao, caminho_xml, caminho_xml IS NOT NULL AS xml_baixado
+            FROM nfe {where}
+            ORDER BY data_emissao DESC LIMIT ? OFFSET ?""",
+        [*parametros, limite, deslocamento],
+    ).fetchall()
+    resumo = cur.execute(
+        f"""SELECT COUNT(*) AS quantidade,
+                   COALESCE(SUM(CAST(valor AS REAL)), 0) AS valor_total,
+                   COALESCE(SUM(CASE WHEN caminho_xml IS NOT NULL THEN 1 ELSE 0 END), 0) AS baixados
+            FROM nfe {where}""",
+        parametros,
+    ).fetchone()
+    return [dict(n) for n in notas], dict(resumo)
+
+
+================================================================================
+ARQUIVO: nfe_monitor/infrastructure/paths.py
+================================================================================
+import os
+import sys
+from pathlib import Path
+
+CNPJ = "29369431000101"
+
+
+def pasta_dados() -> Path:
+    """Banco e XMLs ficam no perfil do usuário, que é gravável."""
+    base = Path(os.environ.get("APPDATA", Path.home())) / "NFeMonitor"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def recurso(relativo: str) -> Path:
+    """Funciona tanto no código-fonte quanto no executável do PyInstaller.
+
+    paths.py -> infrastructure -> nfe_monitor -> raiz do projeto (parents[2]).
+    """
+    raiz = getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2])
+    return Path(raiz) / relativo
+
+
+PASTA_DADOS = pasta_dados()
+DB = PASTA_DADOS / "nfe.db"
+PASTA_XML = PASTA_DADOS / "xml" / CNPJ
+
+
+================================================================================
+ARQUIVO: nfe_monitor/infrastructure/preferencias.py
+================================================================================
+import json
+import os
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+from nfe_monitor.infrastructure.paths import PASTA_DADOS
+
+ARQUIVO: Path = PASTA_DADOS / "config.json"
+
+
+@dataclass
+class Preferencias:
+    thumbprint: str = ""             # certificado padrão (usado se a empresa não tiver o seu)
+    pasta_download: str = ""         # vazio = perguntar a cada download
+    ultima_sincronizacao: str = ""   # ISO com fuso de Brasília
+    empresa_filtro: str = ""         # CNPJ escolhido na tela; vazio = todas as empresas
+
+
+def carregar() -> Preferencias:
+    if not ARQUIVO.exists():
+        return Preferencias()
+    try:
+        dados = json.loads(ARQUIVO.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return Preferencias()
+    if not isinstance(dados, dict):
+        return Preferencias()
+    campos = Preferencias.__dataclass_fields__
+    return Preferencias(**{
+        k: v for k, v in dados.items() if k in campos and isinstance(v, str)
+    })
+
+
+def salvar(p: Preferencias) -> None:
+    """Grava em arquivo temporário e troca de uma vez: nunca deixa o JSON pela metade."""
+    ARQUIVO.parent.mkdir(parents=True, exist_ok=True)
+    temporario = ARQUIVO.with_suffix(".json.tmp")
+    temporario.write_text(json.dumps(asdict(p), ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporario, ARQUIVO)
+
+
+================================================================================
+ARQUIVO: nfe_monitor/infrastructure/sefaz/__init__.py
+================================================================================
+
+
+================================================================================
+ARQUIVO: nfe_monitor/infrastructure/sefaz/cliente.py
+================================================================================
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+
+from nfe_monitor.infrastructure.sefaz.parametros import Config
+
+
+class ErroTransporte(RuntimeError):
+    """Falha ao chamar a SEFAZ ou resposta HTTP inesperada."""
+
+
+_LINHA_STATUS = re.compile(r"^HTTP/?\S*\s+(\d{3})\b")
+
+# Existe só no Windows. Em outros sistemas, vale 0 (sem efeito).
+_SEM_JANELA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _envelope_distribuicao(cnpj: str, bloco_consulta: str, cfg: Config) -> str:
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                 xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                 xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <nfeDistDFeInteresse xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe">
+      <nfeDadosMsg>
+        <distDFeInt xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.01">
+          <tpAmb>{cfg.tp_amb}</tpAmb>
+          <cUFAutor>{cfg.uf_autor}</cUFAutor>
+          <CNPJ>{cnpj}</CNPJ>
+          {bloco_consulta}
+        </distDFeInt>
+      </nfeDadosMsg>
+    </nfeDistDFeInteresse>
+  </soap12:Body>
+</soap12:Envelope>"""
+
+
+def montar_envelope(cnpj: str, ult_nsu: str, cfg: Config) -> str:
+    bloco = f"""<distNSU>
+            <ultNSU>{ult_nsu}</ultNSU>
+          </distNSU>"""
+    return _envelope_distribuicao(cnpj, bloco, cfg)
+
+
+def montar_envelope_chave(cnpj: str, chave: str, cfg: Config) -> str:
+    bloco = f"""<consChNFe>
+            <chNFe>{chave}</chNFe>
+          </consChNFe>"""
+    return _envelope_distribuicao(cnpj, bloco, cfg)
+
+
+def _decodificar(bruto: bytes) -> str:
+    """Converte bytes em texto, tratando BOM UTF-8 e UTF-16 (o que o PowerShell grava)."""
+    if bruto.startswith((b"\xff\xfe", b"\xfe\xff")):
+        texto = bruto.decode("utf-16")
+    else:
+        texto = bruto.decode("utf-8-sig", errors="replace")
+    return texto.replace("\x00", "").lstrip("\ufeff")
+
+
+def _executar_powershell(entrada: Path, saida: Path, cfg: Config) -> None:
+    try:
+        r = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", str(cfg.script_ps),
+                "-Thumbprint", cfg.thumbprint,
+                "-Url", cfg.url,
+                "-ArquivoEntrada", str(entrada),
+                "-ArquivoSaida", str(saida),
+                "-SoapAction", cfg.soap_action,
+            ],
+            capture_output=True,
+            timeout=cfg.timeout_s,
+            creationflags=_SEM_JANELA,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ErroTransporte(f"Sem resposta da SEFAZ após {cfg.timeout_s}s") from e
+
+    if r.returncode != 0:
+        erro = _decodificar(r.stderr) + _decodificar(r.stdout)
+        raise ErroTransporte(f"PowerShell falhou (código {r.returncode}):\n{erro.strip()}")
+
+    if not saida.exists():
+        raise ErroTransporte("O script PowerShell terminou sem gerar o arquivo de saída")
+
+
+def _validar_resposta(texto: str) -> str:
+    """Confere a linha de status e devolve somente o corpo XML."""
+    texto = texto.lstrip()
+    linha, _, corpo = texto.partition("\n")
+    corpo = corpo.strip()
+
+    m = _LINHA_STATUS.match(linha.strip())
+    if not m:
+        raise ErroTransporte(
+            "Linha de status não reconhecida.\n"
+            f"Início do arquivo: {texto[:200]!r}"
+        )
+    if m.group(1) != "200":
+        raise ErroTransporte(f"HTTP {m.group(1)} da SEFAZ:\n{corpo[:500]}")
+    if not corpo.startswith("<"):
+        raise ErroTransporte(f"Corpo da resposta não é XML:\n{corpo[:300]}")
+    return corpo
+
+
+def enviar_soap(envelope: str, cfg: Config) -> str:
+    """Envia um envelope SOAP já montado (e assinado, se for o caso) e devolve o corpo XML."""
+    with tempfile.TemporaryDirectory() as pasta:
+        entrada = Path(pasta) / "entrada.xml"
+        saida = Path(pasta) / "saida.txt"
+
+        entrada.write_text(envelope, encoding="utf-8")
+        _executar_powershell(entrada, saida, cfg)
+        texto = _decodificar(saida.read_bytes())
+
+    return _validar_resposta(texto)
+
+
+def consultar(cnpj: str, ult_nsu: str, cfg: Config) -> str:
+    """Distribuição a partir do NSU (lotes)."""
+    return enviar_soap(montar_envelope(cnpj, ult_nsu, cfg), cfg)
+
+
+def consultar_chave(cnpj: str, chave: str, cfg: Config) -> str:
+    """Distribuição pela chave (consChNFe). Devolve o XML completo se a ciência já foi registrada."""
+    return enviar_soap(montar_envelope_chave(cnpj, chave, cfg), cfg)
+
+
+================================================================================
+ARQUIVO: nfe_monitor/infrastructure/sefaz/distribuicao.py
+================================================================================
+import base64
+import gzip
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from datetime import datetime
+from decimal import Decimal
+
+from nfe_monitor.domain.resumo import FUSO, Resumo
+
+__all__ = [
+    "NS", "CSTAT_ESPERA", "CSTAT_SEM_DOCS", "CSTAT_COM_DOCS", "FUSO",
+    "Documento", "Lote", "Resumo",
+    "normalizar_data", "ler_lote", "ler_resumo", "ler_completo",
+]
+
+NS = {"nfe": "http://www.portalfiscal.inf.br/nfe"}
+
+CSTAT_ESPERA = "656"      # consumo indevido: aguardar antes de nova consulta
+CSTAT_SEM_DOCS = "137"    # nenhum documento localizado
+CSTAT_COM_DOCS = "138"    # documentos localizados
+
+
+def normalizar_data(texto: str | None) -> str:
+    """Converte a data para 'AAAA-MM-DD HH:MM:SS' no horário de Brasília (ordenável como texto)."""
+    if not texto:
+        return ""
+    try:
+        dt = datetime.fromisoformat(texto)
+    except ValueError:
+        return texto
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=FUSO)
+    return dt.astimezone(FUSO).strftime("%Y-%m-%d %H:%M:%S")
+
+
+@dataclass(frozen=True)
+class Documento:
+    nsu: str
+    schema: str
+    xml: str
+
+    @property
+    def tipo(self) -> str:
+        if self.schema.startswith("resNFe"):
+            return "resumo"
+        if self.schema.startswith("procNFe"):
+            return "completo"
+        return "outro"
+
+
+@dataclass(frozen=True)
+class Lote:
+    cstat: str
+    motivo: str
+    ult_nsu: str | None
+    max_nsu: str | None
+    docs: list[Documento] = field(default_factory=list)
+
+
+def _encontrar_ret(raiz: ET.Element) -> ET.Element | None:
+    """Localiza retDistDFeInt na raiz ou em qualquer nível abaixo dela."""
+    alvo = f"{{{NS['nfe']}}}retDistDFeInt"
+    return next((e for e in raiz.iter() if e.tag == alvo), None)
+
+
+def ler_lote(corpo: str, exigir_nsu: bool = True) -> Lote:
+    ret = _encontrar_ret(ET.fromstring(corpo))
+    if ret is None:
+        raise ValueError("Resposta sem retDistDFeInt")
+
+    cstat = ret.findtext("nfe:cStat", namespaces=NS)
+    motivo = ret.findtext("nfe:xMotivo", namespaces=NS)
+    ult_nsu = ret.findtext("nfe:ultNSU", namespaces=NS)
+    max_nsu = ret.findtext("nfe:maxNSU", namespaces=NS)
+
+    if not cstat:
+        raise ValueError("Resposta da SEFAZ sem cStat")
+    if exigir_nsu and cstat in (CSTAT_SEM_DOCS, CSTAT_COM_DOCS) and not (ult_nsu and max_nsu):
+        raise ValueError(f"Resposta cStat {cstat} sem ultNSU ou maxNSU")
+
+    docs = []
+    for d in ret.findall("nfe:loteDistDFeInt/nfe:docZip", NS):
+        conteudo = gzip.decompress(base64.b64decode(d.text or "")).decode("utf-8")
+        docs.append(Documento(nsu=d.get("NSU", ""), schema=d.get("schema", ""), xml=conteudo))
+
+    return Lote(cstat=cstat, motivo=motivo or "", ult_nsu=ult_nsu, max_nsu=max_nsu, docs=docs)
+
+
+def ler_resumo(xml: str) -> Resumo:
+    """resNFe: dados mínimos. Situação é cSitNFe (1 autorizada, 2 cancelada, 3 denegada)."""
+    r = ET.fromstring(xml)
+    return Resumo(
+        chave=r.findtext("nfe:chNFe", namespaces=NS),
+        emitente_cnpj=r.findtext("nfe:CNPJ", namespaces=NS) or "",
+        emitente_nome=r.findtext("nfe:xNome", namespaces=NS) or "",
+        data_emissao=normalizar_data(r.findtext("nfe:dhEmi", namespaces=NS)),
+        valor=Decimal(r.findtext("nfe:vNF", namespaces=NS)),
+        situacao=r.findtext("nfe:cSitNFe", namespaces=NS) or "",
+        protocolo=r.findtext("nfe:nProt", namespaces=NS),
+    )
+
+
+def ler_completo(xml: str) -> Resumo:
+    """procNFe: XML completo. Situação é o cStat do protocolo (100 autorizada, 101 cancelada)."""
+    raiz = ET.fromstring(xml)
+    inf = raiz.find(".//nfe:infNFe", NS)
+    if inf is None:
+        raise ValueError("procNFe sem infNFe")
+
+    emit = inf.find("nfe:emit", NS)
+    prot = raiz.find(".//nfe:protNFe/nfe:infProt", NS)
+
+    return Resumo(
+        chave=inf.get("Id", "")[3:],  # remove o prefixo "NFe"
+        emitente_cnpj=(emit.findtext("nfe:CNPJ", namespaces=NS)
+                       or emit.findtext("nfe:CPF", namespaces=NS) or ""),
+        emitente_nome=emit.findtext("nfe:xNome", namespaces=NS) or "",
+        data_emissao=normalizar_data(
+            inf.findtext("nfe:ide/nfe:dhEmi", namespaces=NS)
+            or inf.findtext("nfe:ide/nfe:dEmi", namespaces=NS)
+        ),
+        valor=Decimal(inf.findtext("nfe:total/nfe:ICMSTot/nfe:vNF", namespaces=NS)),
+        situacao=(prot.findtext("nfe:cStat", namespaces=NS) or "") if prot is not None else "",
+        protocolo=prot.findtext("nfe:nProt", namespaces=NS) if prot is not None else None,
+    )
+
+
+================================================================================
+ARQUIVO: nfe_monitor/infrastructure/sefaz/manifestacao.py
+================================================================================
+import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
+from dataclasses import replace
+from datetime import datetime
+from pathlib import Path
+
+from nfe_monitor.domain.resumo import FUSO
+from nfe_monitor.infrastructure.paths import recurso
+from nfe_monitor.infrastructure.sefaz import cliente
+from nfe_monitor.infrastructure.sefaz.parametros import Config
+
+__all__ = [
+    "TP_EVENTO_CIENCIA", "COD_ORGAO_AN", "URL_EVENTO", "SOAP_ACTION_EVENTO",
+    "CSTATS_CIENCIA_OK", "CSTAT_DUPLICIDADE", "ErroEvento", "enviar_ciencia",
+]
+
+TP_EVENTO_CIENCIA = "210210"
+COD_ORGAO_AN = "91"  # Ambiente Nacional, usado nos eventos de manifestação
+URL_EVENTO = {
+    # Confirme as URLs no portal da NF-e antes de usar.
+    1: "https://www.nfe.fazenda.gov.br/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx",
+    2: "https://hom.nfe.fazenda.gov.br/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx",
+}
+SOAP_ACTION_EVENTO = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4/nfeRecepcaoEventoNF"
+
+CSTATS_CIENCIA_OK = {"135", "136"}  # 135 vinculado; 136 registrado sem vinculação
+CSTAT_DUPLICIDADE = "573"           # evento já registrado: tratado como sucesso
+
+_SEM_JANELA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+class ErroEvento(RuntimeError):
+    """Falha de negócio na manifestação ou na obtenção do XML (mostrada ao usuário)."""
+
+
+def _montar_evento(cnpj: str, chave: str, cfg: Config) -> str:
+    agora = datetime.now(FUSO)
+    id_evento = f"ID{TP_EVENTO_CIENCIA}{chave}01"  # ID + tpEvento + chave + nSeqEvento
+    id_lote = agora.strftime("%y%m%d%H%M%S")
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                 xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                 xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4">
+      <envEvento xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.00">
+        <idLote>{id_lote}</idLote>
+        <evento versao="1.00">
+          <infEvento Id="{id_evento}">
+            <cOrgao>{COD_ORGAO_AN}</cOrgao>
+            <tpAmb>{cfg.tp_amb}</tpAmb>
+            <CNPJ>{cnpj}</CNPJ>
+            <chNFe>{chave}</chNFe>
+            <dhEvento>{agora.isoformat(timespec="seconds")}</dhEvento>
+            <tpEvento>{TP_EVENTO_CIENCIA}</tpEvento>
+            <nSeqEvento>1</nSeqEvento>
+            <verEvento>1.00</verEvento>
+            <detEvento versao="1.00">
+              <descEvento>Ciencia da Operacao</descEvento>
+            </detEvento>
+          </infEvento>
+        </evento>
+      </envEvento>
+    </nfeDadosMsg>
+  </soap12:Body>
+</soap12:Envelope>"""
+
+
+def _assinar(xml: str, thumbprint: str) -> str:
+    with tempfile.TemporaryDirectory() as pasta:
+        entrada = Path(pasta) / "evento.xml"
+        saida = Path(pasta) / "evento_assinado.xml"
+        entrada.write_text(xml, encoding="utf-8")
+
+        r = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", str(recurso("scripts/assinar_evento.ps1")),
+                "-Thumbprint", thumbprint,
+                "-ArquivoEntrada", str(entrada),
+                "-ArquivoSaida", str(saida),
+            ],
+            capture_output=True,
+            timeout=60,
+            creationflags=_SEM_JANELA,
+        )
+        if r.returncode != 0:
+            erro = (r.stderr + r.stdout).decode("utf-8", errors="replace")
+            raise ErroEvento(f"Falha ao assinar o evento:\n{erro.strip()}")
+
+        # utf-8-sig remove o BOM que o .NET costuma gravar
+        return saida.read_text(encoding="utf-8-sig")
+
+
+def _local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _resultado_evento(corpo: str) -> tuple[str, str]:
+    """Lê cStat e xMotivo do infEvento da resposta do serviço de eventos."""
+    raiz = ET.fromstring(corpo)
+    for el in raiz.iter():
+        if _local(el.tag) != "infEvento":
+            continue
+        valores = {_local(f.tag): (f.text or "") for f in el}
+        return valores.get("cStat", ""), valores.get("xMotivo", "")
+    raise ErroEvento("Resposta do serviço de eventos sem infEvento")
+
+
+def enviar_ciencia(chave: str, cnpj: str, cfg: Config) -> tuple[str, str]:
+    """Monta, assina e envia a Ciência da Operação. Devolve (cStat, xMotivo)."""
+    evento_cfg = replace(cfg, url=URL_EVENTO[cfg.tp_amb], soap_action=SOAP_ACTION_EVENTO)
+    assinado = _assinar(_montar_evento(cnpj, chave, cfg), cfg.thumbprint)
+    corpo = cliente.enviar_soap(assinado, evento_cfg)
+    return _resultado_evento(corpo)
+
+
+================================================================================
+ARQUIVO: nfe_monitor/infrastructure/sefaz/parametros.py
+================================================================================
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from nfe_monitor.infrastructure import preferencias
+from nfe_monitor.infrastructure.paths import DB, recurso
+
+
+@dataclass(frozen=True)
+class Config:
+    # Confirme a URL de produção no portal da NF-e antes de usar.
+    url: str = "https://www1.nfe.fazenda.gov.br/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx"
+    soap_action: str = (
+        "http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse"
+    )
+    tp_amb: int = 1       # 1 = produção, 2 = homologação
+    uf_autor: str = "29"  # código da UF do autor (Bahia)
+    banco: Path = DB
+    script_ps: Path = recurso("scripts/envia_soap.ps1")
+    timeout_s: int = 120
+    # Lido do config.json a cada Config(): sempre reflete a escolha atual
+    thumbprint: str = field(default_factory=lambda: preferencias.carregar().thumbprint)
+
+
+================================================================================
+ARQUIVO: nfe_monitor/ui/__init__.py
+================================================================================
+
+
+================================================================================
+ARQUIVO: nfe_monitor/ui/formatters.py
+================================================================================
+from datetime import datetime
+from decimal import Decimal
+
+
+def formatar_brl(valor) -> str:
+    if valor in (None, ""):
+        return ""
+    texto = f"{Decimal(str(valor)):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {texto}"
+
+
+def formatar_data(texto: str | None) -> str:
+    if not texto:
+        return ""
+    try:
+        return datetime.strptime(texto, "%Y-%m-%d %H:%M:%S").strftime("%d/%m/%Y %H:%M")
+    except ValueError:
+        return texto
+
+
+================================================================================
+ARQUIVO: nfe_monitor/ui/models/__init__.py
+================================================================================
+
+
+================================================================================
+ARQUIVO: nfe_monitor/ui/models/notas_model.py
+================================================================================
+from PySide6.QtCore import QAbstractListModel, QByteArray, QModelIndex, Qt
+
+from nfe_monitor.ui.formatters import formatar_brl, formatar_data
+from nfe_monitor.domain.nota import numero_da_nota, situacao_da
+
+_TEXTO_SITUACAO = {"baixado": "XML baixado", "ciencia": "Ciência registrada", "pendente": "Pendente"}
+
+
+def _iniciais(nome: str) -> str:
+    partes = [p for p in nome.split() if p[:1].isalnum()]
+    return "".join(p[0] for p in partes[:2]).upper() or "?"
+
+
+class NotasModel(QAbstractListModel):
+    _NOMES = ["emitente", "iniciais", "numero", "data", "valor",
+              "situacao", "situacaoTexto", "chave", "baixado"]
+    ROLES = {Qt.UserRole + i + 1: n for i, n in enumerate(_NOMES)}
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._notas: list[dict] = []
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._notas)
+
+    def roleNames(self) -> dict[int, QByteArray]:
+        return {r: QByteArray(n.encode()) for r, n in self.ROLES.items()}
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        n = self._notas[index.row()]
+        match self.ROLES.get(role):
+            case "emitente": return n["emitente"] or "Emitente não informado"
+            case "iniciais": return _iniciais(n["emitente"] or "")
+            case "numero": return numero_da_nota(n["chave"])
+            case "data": return formatar_data(n["data_emissao"])
+            case "valor": return formatar_brl(n["valor"])
+            case "situacao": return situacao_da(n)
+            case "situacaoTexto": return _TEXTO_SITUACAO[situacao_da(n)]
+            case "chave": return n["chave"]
+            case "baixado": return bool(n["xml_baixado"])
+        return None
+
+    def carregar(self, notas: list[dict]) -> None:
+        self.beginResetModel()
+        self._notas = notas
+        self.endResetModel()
+
+    def nota(self, linha: int) -> dict | None:
+        return self._notas[linha] if 0 <= linha < len(self._notas) else None
+
+
+================================================================================
+ARQUIVO: nfe_monitor/ui/qml/Main.txt
+================================================================================
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import QtQuick.Dialogs
+
+ApplicationWindow {
+    id: root
+    width: 1440
+    height: 860
+    minimumWidth: 1180
+    minimumHeight: 680
+    visible: true
+    visibility: Window.Maximized
+    title: "NF-e Monitor"
+    color: Theme.t.background
+
+    readonly property var corSituacao: ({
+        baixado: [Theme.t.status.sucesso, Theme.t.status.sucessoSoft],
+        ciencia: [Theme.t.status.info, Theme.t.status.infoSoft],
+        pendente: [Theme.t.status.alerta, Theme.t.status.alertaSoft]
+    })
+    readonly property var paletaAvatar: ["#6366F1", "#0EA5E9", "#10B981", "#F59E0B", "#EF4444", "#EC4899", "#8B5CF6", "#14B8A6"]
+
+    function corAvatar(nome) {
+        let h = 0
+        for (let i = 0; i < nome.length; i++) h = (h * 31 + nome.charCodeAt(i)) >>> 0
+        return paletaAvatar[h % paletaAvatar.length]
+    }
+    function paraIso(texto) {
+        const d = texto.replace(/\D/g, "")
+        return d.length === 8 ? d.slice(4) + "-" + d.slice(2, 4) + "-" + d.slice(0, 2) : ""
+    }
+    function mascaraData(campo) {
+        const d = campo.text.replace(/\D/g, "").slice(0, 8)
+        let f = d
+        if (d.length > 4) f = d.slice(0, 2) + "/" + d.slice(2, 4) + "/" + d.slice(4)
+        else if (d.length > 2) f = d.slice(0, 2) + "/" + d.slice(2)
+        if (f !== campo.text) campo.text = f
+    }
+    function filtrar() {
+        viewModel.aplicarFiltros(buscaInput.text, paraIso(deInput.text), paraIso(ateInput.text))
+    }
+    function toast(msg) { toastBox.texto = msg; toastBox.opacity = 1; toastTimer.restart() }
+
+    onClosing: (close) => {
+        if (!viewModel.podeFechar() || config.ocupado) {
+            close.accepted = false
+            toast("Há uma operação em andamento. Aguarde para fechar.")
+        }
+    }
+
+    // =================== Componentes ===================
+    component Txt: Text {
+        property bool fraco: false
+        color: fraco ? Theme.t.muted : Theme.t.text
+        font.family: Theme.t.fontes.texto
+        font.pixelSize: 14
+        elide: Text.ElideRight
+        verticalAlignment: Text.AlignVCenter
+    }
+
+    component Btn: Button {
+        id: b
+        property string variante: "primario"   // primario | suave | fantasma
+        property color corBase: variante === "primario" ? Theme.t.accent
+                              : variante === "suave" ? Theme.t.accentSoft : "transparent"
+        property color corTexto: variante === "primario" ? Theme.t.onAccent : Theme.t.accent
+        hoverEnabled: true
+        padding: 0
+        implicitHeight: 40
+        implicitWidth: Math.max(96, rot.implicitWidth + 32)
+        contentItem: Text {
+            id: rot
+            text: b.text
+            color: b.corTexto
+            font.family: Theme.t.fontes.texto
+            font.pixelSize: 14
+            font.weight: 600
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+        }
+        background: Rectangle {
+            radius: Theme.t.radius - 4
+            color: b.down ? Qt.darker(b.corBase, 1.15)
+                 : b.hovered ? (b.variante === "fantasma" ? Theme.t.accentSoft : Qt.lighter(b.corBase, 1.08))
+                 : b.corBase
+            border.color: b.variante === "fantasma" ? Theme.t.border : "transparent"
+            Behavior on color { ColorAnimation { duration: 120 } }
+        }
+        opacity: enabled ? 1 : 0.4
+        HoverHandler { cursorShape: Qt.PointingHandCursor }
+    }
+
+    component Campo: TextField {
+        id: c
+        property string icone: ""
+        color: Theme.t.text
+        placeholderTextColor: Theme.t.muted
+        font.family: Theme.t.fontes.texto
+        font.pixelSize: 14
+        leftPadding: icone ? 38 : 14
+        implicitHeight: 42
+        selectByMouse: true
+        background: Rectangle {
+            radius: Theme.t.radius - 4
+            color: Theme.t.surfaceAlt
+            border.width: c.activeFocus ? 2 : 1
+            border.color: c.activeFocus ? Theme.t.accent : Theme.t.border
+            Text {
+                visible: c.icone.length > 0
+                text: c.icone
+                anchors.left: parent.left
+                anchors.leftMargin: 13
+                anchors.verticalCenter: parent.verticalCenter
+                color: Theme.t.muted
+                font.pixelSize: 15
+            }
+        }
+    }
+
+    component Combo: ComboBox {
+        id: cb
+        textRole: "nome"
+        valueRole: "id"
+        implicitHeight: 42
+        contentItem: Txt { leftPadding: 14; text: cb.displayText }
+        background: Rectangle {
+            radius: Theme.t.radius - 4
+            color: Theme.t.surfaceAlt
+            border.color: cb.activeFocus ? Theme.t.accent : Theme.t.border
+        }
+        delegate: ItemDelegate {
+            required property var modelData
+            required property int index
+            width: cb.width
+            contentItem: Txt { text: modelData.nome }
+            background: Rectangle { color: cb.highlightedIndex === index ? Theme.t.accentSoft : Theme.t.surface }
+        }
+        popup.background: Rectangle { color: Theme.t.surface; border.color: Theme.t.border; radius: 10 }
+    }
+
+    component Cartao: Rectangle {
+        color: Theme.t.surface
+        radius: Theme.t.radius
+        border.color: Theme.t.border
+    }
+
+    component Pilula: Rectangle {
+        id: pil
+        property string chave: "pendente"
+        property string texto: ""
+        implicitWidth: lbl.implicitWidth + 30
+        implicitHeight: 26
+        radius: 13
+        color: root.corSituacao[pil.chave][1]
+        Row {
+            anchors.centerIn: parent
+            spacing: 6
+            Rectangle { width: 7; height: 7; radius: 4; anchors.verticalCenter: parent.verticalCenter; color: root.corSituacao[pil.chave][0] }
+            Text { id: lbl; text: pil.texto; color: root.corSituacao[pil.chave][0]; font.family: Theme.t.fontes.texto; font.pixelSize: 12; font.weight: 700 }
+        }
+    }
+
+    component RailBtn: AbstractButton {
+        id: rb
+        property string icone: ""
+        property bool ativo: false
+        property string dica: ""
+        implicitWidth: 48
+        implicitHeight: 48
+        hoverEnabled: true
+        contentItem: Text {
+            text: rb.icone
+            color: rb.ativo ? "#FFFFFF" : "#9AA3B5"
+            font.pixelSize: 20
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+        }
+        background: Rectangle {
+            radius: 14
+            color: rb.ativo ? Theme.t.accent : rb.hovered ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+        }
+        ToolTip.visible: hovered && dica.length > 0
+        ToolTip.text: dica
+        HoverHandler { cursorShape: Qt.PointingHandCursor }
+    }
+
+    component Metrica: Cartao {
+        id: met
+        property string rotulo
+        property string valor
+        property string icone
+        property color cor: Theme.t.accent
+        property real progresso: -1
+        Layout.fillWidth: true
+        implicitHeight: 104
+        Rectangle { width: 4; height: parent.height - 32; radius: 2; color: met.cor; anchors.left: parent.left; anchors.leftMargin: 14; anchors.verticalCenter: parent.verticalCenter }
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 32
+            anchors.rightMargin: 20
+            anchors.topMargin: 16
+            anchors.bottomMargin: 16
+            spacing: 4
+            RowLayout {
+                Txt { text: met.rotulo.toUpperCase(); fraco: true; font.pixelSize: 11; font.weight: 700; font.letterSpacing: 1.2; Layout.fillWidth: true }
+                Txt { text: met.icone; color: met.cor; font.pixelSize: 18 }
+            }
+            Txt { text: met.valor; font.family: Theme.t.fontes.titulo; font.pixelSize: 28; font.weight: 700 }
+            Rectangle {
+                visible: met.progresso >= 0
+                Layout.fillWidth: true
+                height: 4
+                radius: 2
+                color: Theme.t.surfaceAlt
+                Rectangle {
+                    width: parent.width * Math.max(0, Math.min(1, met.progresso)); height: parent.height; radius: 2; color: met.cor
+                    Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                }
+            }
+        }
+    }
+
+    // =================== Diálogos ===================
+    FolderDialog {
+        id: pastaDialog
+        property int linha: -1
+        title: "Pasta para salvar o XML"
+        onAccepted: viewModel.continuarComPasta(linha, selectedFolder.toString())
+    }
+
+    FolderDialog {
+        id: pastaConfigDialog
+        title: "Pasta padrão dos XMLs"
+        onAccepted: pastaConfig.text = config.caminhoDe(selectedFolder.toString())
+    }
+
+    Dialog {
+        id: cienciaDialog
+        property int linha: -1
+        property string pasta: ""
+        modal: true
+        anchors.centerIn: parent
+        width: 460
+        padding: 28
+        background: Cartao { border.color: Theme.t.status.alerta }
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 14
+            Txt { text: "⚠  Registrar ciência da operação"; font.pixelSize: 18; font.weight: 700 }
+            Txt {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                elide: Text.ElideNone
+                fraco: true
+                text: "Para baixar este XML é preciso registrar a ciência na SEFAZ. Essa manifestação é <b>definitiva</b> e não pode ser desfeita."
+                textFormat: Text.StyledText
+            }
+            RowLayout {
+                Layout.topMargin: 8
+                Item { Layout.fillWidth: true }
+                Btn { text: "Cancelar"; variante: "fantasma"; onClicked: cienciaDialog.close() }
+                Btn { text: "Registrar e baixar"; onClicked: { cienciaDialog.close(); viewModel.confirmarCiencia(cienciaDialog.linha, cienciaDialog.pasta) } }
+            }
+        }
+    }
+
+    Dialog {
+        id: erroDialog
+        property string titulo: ""
+        property string mensagem: ""
+        modal: true
+        anchors.centerIn: parent
+        width: 480
+        padding: 28
+        background: Cartao { border.color: Theme.t.status.perigo }
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 14
+            Txt { text: "✕  " + erroDialog.titulo; color: Theme.t.status.perigo; font.pixelSize: 18; font.weight: 700 }
+            Txt { Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone; text: erroDialog.mensagem }
+            RowLayout { Item { Layout.fillWidth: true } Btn { text: "Entendi"; onClicked: erroDialog.close() } }
+        }
+    }
+
+    Connections {
+        target: viewModel
+        function onSolicitarPasta(linha) { pastaDialog.linha = linha; pastaDialog.open() }
+        function onSolicitarCiencia(linha, pasta) { cienciaDialog.linha = linha; cienciaDialog.pasta = pasta; cienciaDialog.open() }
+        function onNotificacao(msg) { root.toast(msg) }
+        function onErro(titulo, msg) { erroDialog.titulo = titulo; erroDialog.mensagem = msg; erroDialog.open() }
+        function onEmpresasChanged() { empresaCombo.currentIndex = viewModel.empresaIndice }
+    }
+
+    // ---------- Configurações ----------
+    Dialog {
+        id: configDialog
+        modal: true
+        anchors.centerIn: parent
+        width: 680
+        padding: 28
+        onAboutToShow: {
+            config.carregar()
+            certCombo.currentIndex = certCombo.indexOfValue(config.thumbprint)
+            pastaConfig.text = config.pasta
+            temaCombo.currentIndex = temaCombo.indexOfValue(Theme.selecionado)
+            configErro.text = ""
+            configAviso.text = ""
+            ufCampo.clear()
+        }
+        background: Cartao {}
+
+        Connections {
+            target: config
+            function onErro(msg) { configAviso.text = ""; configErro.text = msg }
+            function onCadastrado(msg) {
+                configErro.text = ""
+                configAviso.text = msg
+                root.toast("✓ Empresa cadastrada")
+            }
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 18
+
+            Txt { text: "Configurações"; font.family: Theme.t.fontes.titulo; font.pixelSize: 22; font.weight: 700 }
+
+            // Certificado
+            ColumnLayout {
+                spacing: 6
+                Layout.fillWidth: true
+                Txt { text: "CERTIFICADO DIGITAL"; fraco: true; font.pixelSize: 11; font.weight: 700; font.letterSpacing: 1.2 }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Combo { id: certCombo; Layout.fillWidth: true; model: config.certificados }
+                    Btn { text: "↻"; variante: "fantasma"; implicitWidth: 42; enabled: !config.ocupado; onClicked: { config.carregar(); certCombo.currentIndex = certCombo.indexOfValue(config.thumbprint) } }
+                }
+                Txt {
+                    readonly property var c: certCombo.currentIndex >= 0 ? config.certificados[certCombo.currentIndex] : null
+                    text: c ? "CNPJ " + c.cnpj + " · Validade: " + c.validade + " · " + c.situacao
+                            : (config.certificados.length === 0 ? "Nenhum certificado encontrado no Windows." : "Selecione um certificado.")
+                    color: c && c.alerta ? Theme.t.status.alerta : Theme.t.muted
+                    font.pixelSize: 12
+                }
+            }
+
+            // Empresas
+            ColumnLayout {
+                spacing: 6
+                Layout.fillWidth: true
+                Txt { text: "EMPRESAS MONITORADAS"; fraco: true; font.pixelSize: 11; font.weight: 700; font.letterSpacing: 1.2 }
+
+                Repeater {
+                    model: config.empresas
+                    Rectangle {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        implicitHeight: 46
+                        radius: Theme.t.radius - 4
+                        color: Theme.t.surfaceAlt
+                        border.color: Theme.t.border
+                        opacity: modelData.ativo ? 1 : 0.5
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 14
+                            anchors.rightMargin: 10
+                            spacing: 12
+                            Txt { text: modelData.nome; Layout.fillWidth: true; font.weight: 600 }
+                            Txt { text: modelData.cnpj; fraco: true; font.family: Theme.t.fontes.mono; font.pixelSize: 12 }
+                            Txt { text: modelData.uf; fraco: true; font.weight: 700; Layout.preferredWidth: 26 }
+                            Pilula {
+                                chave: modelData.completa ? "baixado" : "pendente"
+                                texto: !modelData.ativo ? "Inativa" : modelData.completa ? "Pronta" : "Incompleta"
+                            }
+                        }
+                    }
+                }
+                Txt { visible: config.empresas.length === 0; text: "Nenhuma empresa cadastrada."; fraco: true; font.pixelSize: 12 }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.topMargin: 4
+                    Campo {
+                        id: ufCampo
+                        Layout.preferredWidth: 110
+                        placeholderText: "UF (auto)"
+                        maximumLength: 2
+                        font.capitalization: Font.AllUppercase
+                        ToolTip.visible: hovered
+                        ToolTip.text: "Deixe vazio para buscar na BrasilAPI"
+                    }
+                    Btn {
+                        Layout.fillWidth: true
+                        variante: "suave"
+                        text: config.ocupado ? "Cadastrando…" : "＋  Cadastrar empresa do certificado selecionado"
+                        enabled: !config.ocupado && certCombo.currentIndex >= 0
+                        onClicked: {
+                            configErro.text = ""
+                            configAviso.text = ""
+                            config.cadastrar(certCombo.currentValue || "", ufCampo.text)
+                        }
+                    }
+                }
+                Txt {
+                    id: configAviso
+                    visible: text.length > 0
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    elide: Text.ElideNone
+                    font.pixelSize: 13
+                    color: text.indexOf("⚠") >= 0 ? Theme.t.status.alerta : Theme.t.status.sucesso
+                }
+            }
+
+            // Pasta
+            ColumnLayout {
+                spacing: 6
+                Layout.fillWidth: true
+                Txt { text: "PASTA DOS XMLS"; fraco: true; font.pixelSize: 11; font.weight: 700; font.letterSpacing: 1.2 }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Campo { id: pastaConfig; Layout.fillWidth: true; readOnly: true; icone: "📁"; placeholderText: "Perguntar a cada download" }
+                    Btn { text: "Escolher"; variante: "suave"; onClicked: pastaConfigDialog.open() }
+                    Btn { text: "Limpar"; variante: "fantasma"; enabled: pastaConfig.text.length > 0; onClicked: pastaConfig.clear() }
+                }
+            }
+
+            // Aparência
+            ColumnLayout {
+                spacing: 6
+                Layout.fillWidth: true
+                Txt { text: "APARÊNCIA"; fraco: true; font.pixelSize: 11; font.weight: 700; font.letterSpacing: 1.2 }
+                Combo { id: temaCombo; Layout.fillWidth: true; model: Theme.opcoes; onActivated: Theme.selecionar(currentValue) }
+            }
+
+            Txt { id: configErro; visible: text.length > 0; color: Theme.t.status.perigo; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Btn { text: "Cancelar"; variante: "fantasma"; onClicked: configDialog.close() }
+                Btn {
+                    text: "Salvar"
+                    enabled: !config.ocupado
+                    onClicked: if (config.salvar(certCombo.currentValue || "", pastaConfig.text)) {
+                        viewModel.atualizarCertificado()
+                        configDialog.close()
+                        root.toast("✓ Configurações salvas")
+                    }
+                }
+            }
+        }
+    }
+
+    // =================== Layout ===================
+    RowLayout {
+        anchors.fill: parent
+        spacing: 0
+
+        // ---------- Barra lateral ----------
+        Rectangle {
+            Layout.fillHeight: true
+            Layout.preferredWidth: 76
+            color: Theme.t.rail
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.topMargin: 18
+                anchors.bottomMargin: 18
+                spacing: 10
+
+                Rectangle {
+                    Layout.alignment: Qt.AlignHCenter
+                    width: 44; height: 44; radius: 14
+                    gradient: Gradient {
+                        GradientStop { position: 0; color: Theme.t.accent }
+                        GradientStop { position: 1; color: Qt.darker(Theme.t.accent, 1.4) }
+                    }
+                    Text { anchors.centerIn: parent; text: "NF"; color: "white"; font.pixelSize: 16; font.weight: 800; font.family: Theme.t.fontes.titulo }
+                }
+                Item { Layout.preferredHeight: 14 }
+                RailBtn { Layout.alignment: Qt.AlignHCenter; icone: "▤"; ativo: true; dica: "Notas recebidas" }
+                Item { Layout.fillHeight: true }
+                RailBtn { Layout.alignment: Qt.AlignHCenter; icone: Theme.t.escuro ? "☀" : "☾"; dica: "Alternar tema"; onClicked: Theme.alternar() }
+                RailBtn { Layout.alignment: Qt.AlignHCenter; icone: "⚙"; dica: "Configurações"; onClicked: configDialog.open() }
+            }
+        }
+
+        // ---------- Conteúdo ----------
+        ColumnLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.margins: 28
+            spacing: 20
+
+            // Cabeçalho
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 16
+                ColumnLayout {
+                    spacing: 6
+                    Txt { text: "Notas recebidas"; font.family: Theme.t.fontes.titulo; font.pixelSize: 30; font.weight: 700 }
+
+                    // Uma empresa: só o CNPJ · Várias: seletor de empresa
+                    Txt {
+                        visible: !viewModel.multiEmpresa
+                        text: "CNPJ " + viewModel.cnpj + "  ·  " + viewModel.status
+                        fraco: true
+                    }
+                    RowLayout {
+                        visible: viewModel.multiEmpresa
+                        spacing: 12
+                        Combo {
+                            id: empresaCombo
+                            Layout.preferredWidth: 420
+                            implicitHeight: 36
+                            model: viewModel.empresasOpcoes
+                            currentIndex: viewModel.empresaIndice
+                            enabled: !viewModel.ocupado
+                            onActivated: viewModel.selecionarEmpresa(currentValue || "")
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Filtrar notas por empresa"
+                        }
+                        Txt { text: viewModel.status; fraco: true }
+                    }
+                }
+                Item { Layout.fillWidth: true }
+                Rectangle {
+                    implicitHeight: 36
+                    implicitWidth: certTxt.implicitWidth + 46
+                    radius: 18
+                    color: viewModel.certAlerta ? Theme.t.status.alertaSoft : Theme.t.status.sucessoSoft
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: configDialog.open() }
+                    Row {
+                        anchors.centerIn: parent
+                        spacing: 8
+                        Text { text: viewModel.certAlerta ? "⚠" : "🛡"; font.pixelSize: 14; color: viewModel.certAlerta ? Theme.t.status.alerta : Theme.t.status.sucesso }
+                        Text {
+                            id: certTxt; text: viewModel.certTexto; font.family: Theme.t.fontes.texto; font.pixelSize: 13; font.weight: 600
+                            color: viewModel.certAlerta ? Theme.t.status.alerta : Theme.t.status.sucesso
+                        }
+                    }
+                }
+            }
+
+            // Painel de sincronização + métricas
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 16
+
+                Rectangle {
+                    Layout.preferredWidth: 360
+                    implicitHeight: 104
+                    radius: Theme.t.radius
+                    gradient: Gradient {
+                        orientation: Gradient.Horizontal
+                        GradientStop { position: 0; color: Theme.t.accent }
+                        GradientStop { position: 1; color: Qt.darker(Theme.t.accent, 1.35) }
+                    }
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 18
+                        spacing: 14
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Text { text: viewModel.proxima ? "PRÓXIMA SINCRONIZAÇÃO" : "SEFAZ"; color: Qt.rgba(1,1,1,0.75); font.pixelSize: 11; font.weight: 700; font.letterSpacing: 1.2; font.family: Theme.t.fontes.texto }
+                            Text { text: viewModel.proxima || (viewModel.ocupado ? "Trabalhando…" : "Liberada"); color: "white"; font.pixelSize: 26; font.weight: 700; font.family: viewModel.proxima ? Theme.t.fontes.mono : Theme.t.fontes.titulo }
+                            Text { text: "Última: " + viewModel.ultima; color: Qt.rgba(1,1,1,0.75); font.pixelSize: 12; font.family: Theme.t.fontes.texto }
+                        }
+                        AbstractButton {
+                            id: syncBtn
+                            implicitWidth: 56; implicitHeight: 56
+                            enabled: viewModel.syncLiberado
+                            hoverEnabled: true
+                            onClicked: viewModel.sincronizar()
+                            ToolTip.visible: hovered
+                            ToolTip.text: enabled ? "Sincronizar agora (F5)" : "Aguarde o intervalo da SEFAZ"
+                            background: Rectangle { radius: 28; color: syncBtn.hovered ? "white" : Qt.rgba(1,1,1,0.92); opacity: syncBtn.enabled ? 1 : 0.35 }
+                            contentItem: Text {
+                                text: "⟳"; color: Theme.t.accent; font.pixelSize: 26; font.weight: 700
+                                horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                                RotationAnimation on rotation { running: viewModel.ocupado; loops: Animation.Infinite; from: 0; to: 360; duration: 1100 }
+                            }
+                            HoverHandler { cursorShape: Qt.PointingHandCursor }
+                        }
+                    }
+                }
+
+                Metrica { rotulo: "Notas encontradas"; valor: viewModel.totalNotas.toLocaleString(Qt.locale("pt_BR"), "f", 0); icone: "▤"; cor: Theme.t.accent }
+                Metrica { rotulo: "Valor total"; valor: viewModel.valorTotal; icone: "$"; cor: Theme.t.status.sucesso }
+                Metrica {
+                    rotulo: "XML baixados"
+                    valor: viewModel.baixados + " / " + viewModel.totalNotas
+                    icone: "⬇"
+                    cor: Theme.t.status.alerta
+                    progresso: viewModel.totalNotas > 0 ? viewModel.baixados / viewModel.totalNotas : 0
+                }
+            }
+
+            // Filtros
+            Cartao {
+                Layout.fillWidth: true
+                implicitHeight: 66
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.margins: 12
+                    spacing: 10
+                    Campo { id: buscaInput; Layout.fillWidth: true; icone: "🔍"; placeholderText: "Buscar fornecedor…  (Ctrl+F)"; onAccepted: root.filtrar() }
+                    Txt { text: "De"; fraco: true }
+                    Campo {
+                        id: deInput; Layout.preferredWidth: 130; placeholderText: "dd/mm/aaaa"; font.family: Theme.t.fontes.mono; maximumLength: 10
+                        onTextEdited: root.mascaraData(deInput); onAccepted: root.filtrar()
+                    }
+                    Txt { text: "até"; fraco: true }
+                    Campo {
+                        id: ateInput; Layout.preferredWidth: 130; placeholderText: "dd/mm/aaaa"; font.family: Theme.t.fontes.mono; maximumLength: 10
+                        onTextEdited: root.mascaraData(ateInput); onAccepted: root.filtrar()
+                    }
+                    Btn { text: "Filtrar"; onClicked: root.filtrar() }
+                    Btn {
+                        text: "Limpar"; variante: "fantasma"; visible: viewModel.filtrado
+                        onClicked: { buscaInput.clear(); deInput.clear(); ateInput.clear(); viewModel.limparFiltros() }
+                    }
+                }
+            }
+
+            // Lista
+            Cartao {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 1
+                    spacing: 0
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 44
+                        Layout.leftMargin: 20
+                        Layout.rightMargin: 20
+                        spacing: 16
+                        Repeater {
+                            model: [
+                                { t: "EMITENTE", w: -1 }, { t: "Nº NF-E", w: 90 }, { t: "EMISSÃO", w: 130 },
+                                { t: "VALOR", w: 130 }, { t: "SITUAÇÃO", w: 170 }, { t: "", w: 140 }
+                            ]
+                            Txt {
+                                required property var modelData
+                                required property int index
+                                text: modelData.t
+                                fraco: true
+                                font.pixelSize: 11
+                                font.weight: 700
+                                font.letterSpacing: 1.2
+                                Layout.fillWidth: modelData.w < 0
+                                Layout.preferredWidth: modelData.w
+                                horizontalAlignment: index === 1 || index === 3 ? Text.AlignRight : Text.AlignLeft
+                            }
+                        }
+                    }
+                    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.t.border }
+
+                    ListView {
+                        id: lista
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        model: viewModel.notas
+                        ScrollBar.vertical: ScrollBar {}
+                        spacing: 0
+
+                        delegate: Rectangle {
+                            id: linha
+                            required property var model
+                            required property int index
+                            required property string emitente
+                            required property string iniciais
+                            required property string numero
+                            required property string valor
+                            required property string situacao
+                            required property string situacaoTexto
+                            required property string chave
+                            required property bool baixado
+                            // "data" é propriedade reservada do Item; lida via model
+                            readonly property string emissao: model.data ?? ""
+
+                            width: lista.width
+                            height: 68
+                            color: hov.hovered ? Theme.t.surfaceAlt : "transparent"
+                            HoverHandler { id: hov }
+                            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.t.border; opacity: 0.6 }
+                            Rectangle { visible: hov.hovered; width: 3; height: parent.height; color: Theme.t.accent }
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 20
+                                anchors.rightMargin: 20
+                                spacing: 16
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Rectangle {
+                                        width: 38; height: 38; radius: 12
+                                        color: Qt.alpha(root.corAvatar(linha.emitente), 0.18)
+                                        Text { anchors.centerIn: parent; text: linha.iniciais; color: root.corAvatar(linha.emitente); font.weight: 800; font.pixelSize: 13; font.family: Theme.t.fontes.texto }
+                                    }
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 2
+                                        Txt { Layout.fillWidth: true; text: linha.emitente; font.weight: 600 }
+                                        Txt {
+                                            Layout.fillWidth: true; text: linha.chave; fraco: true
+                                            font.family: Theme.t.fontes.mono; font.pixelSize: 11
+                                            MouseArea {
+                                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                onClicked: { copiador.text = linha.chave; copiador.selectAll(); copiador.copy(); root.toast("Chave copiada") }
+                                            }
+                                        }
+                                    }
+                                }
+                                Txt { text: linha.numero; Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight; font.family: Theme.t.fontes.mono }
+                                Txt { text: linha.emissao; Layout.preferredWidth: 130; fraco: true; font.pixelSize: 13 }
+                                Txt { text: linha.valor; Layout.preferredWidth: 130; horizontalAlignment: Text.AlignRight; font.family: Theme.t.fontes.mono; font.weight: 600 }
+                                Item {
+                                    Layout.preferredWidth: 170
+                                    implicitHeight: 26
+                                    Pilula { anchors.verticalCenter: parent.verticalCenter; chave: linha.situacao; texto: linha.situacaoTexto }
+                                }
+                                Btn {
+                                    Layout.preferredWidth: 140
+                                    implicitHeight: 34
+                                    variante: linha.baixado ? "fantasma" : "suave"
+                                    text: linha.baixado ? "💾  Salvar" : "⬇  Baixar"
+                                    enabled: !viewModel.ocupado
+                                    onClicked: viewModel.acaoXml(linha.index)
+                                }
+                            }
+                        }
+
+                        // Estado vazio
+                        Column {
+                            anchors.centerIn: parent
+                            visible: lista.count === 0
+                            spacing: 8
+                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: "∅"; font.pixelSize: 44; color: Theme.t.muted }
+                            Txt {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                text: viewModel.filtrado ? "Nenhuma nota com esses filtros"
+                                    : viewModel.empresaIndice > 0 ? "Nenhuma nota para esta empresa"
+                                    : "Nenhuma nota ainda — sincronize com a SEFAZ"
+                                fraco: true
+                            }
+                        }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.t.border }
+
+                    // Paginação
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 56
+                        Layout.leftMargin: 20
+                        Layout.rightMargin: 20
+                        Txt { text: viewModel.totalNotas + " notas"; fraco: true; font.pixelSize: 13 }
+                        Item { Layout.fillWidth: true }
+                        Btn { text: "‹"; variante: "fantasma"; implicitWidth: 40; implicitHeight: 34; enabled: viewModel.pagina > 1 && !viewModel.ocupado; onClicked: { viewModel.irPagina(-1); lista.positionViewAtBeginning() } }
+                        Txt { text: "Página  <b>" + viewModel.pagina + "</b>  de  " + viewModel.totalPaginas; textFormat: Text.StyledText; font.pixelSize: 13; Layout.leftMargin: 8; Layout.rightMargin: 8 }
+                        Btn { text: "›"; variante: "fantasma"; implicitWidth: 40; implicitHeight: 34; enabled: viewModel.pagina < viewModel.totalPaginas && !viewModel.ocupado; onClicked: { viewModel.irPagina(1); lista.positionViewAtBeginning() } }
+                    }
+                }
+            }
+        }
+    }
+
+    // Copiar para a área de transferência
+    TextEdit { id: copiador; visible: false }
+
+    // Toast
+    Rectangle {
+        id: toastBox
+        property string texto: ""
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 28
+        width: toastTxt.implicitWidth + 40
+        height: 44
+        radius: 22
+        color: Theme.t.text
+        opacity: 0
+        visible: opacity > 0
+        Behavior on opacity { NumberAnimation { duration: 220 } }
+        Text { id: toastTxt; anchors.centerIn: parent; text: toastBox.texto; color: Theme.t.background; font.family: Theme.t.fontes.texto; font.pixelSize: 14; font.weight: 600 }
+        Timer { id: toastTimer; interval: 2600; onTriggered: toastBox.opacity = 0 }
+    }
+
+    Shortcut { sequence: "Ctrl+F"; onActivated: buscaInput.forceActiveFocus() }
+    Shortcut { sequence: "F5"; onActivated: if (viewModel.syncLiberado) viewModel.sincronizar() }
+}
+
+
+================================================================================
+ARQUIVO: nfe_monitor/ui/themes/catalog.py
+================================================================================
+from nfe_monitor.ui.themes.theme import Fontes, Status, Theme
+
+SYSTEM_ID = "system"
+
+_FONTES = Fontes(texto="Segoe UI", titulo="Segoe UI Variable Display", mono="Cascadia Mono")
+
+NEBLINA = Theme(
+    id="neblina", nome="Neblina (claro)", escuro=False,
+    background="#EEF0F4", rail="#111827", surface="#FFFFFF", surfaceAlt="#F6F7FA",
+    border="#E3E6EC", accent="#5B5BD6", accentSoft="#ECECFB", onAccent="#FFFFFF",
+    text="#151821", muted="#6B7280", radius=14, fontes=_FONTES,
+    status=Status(sucesso="#12A150", sucessoSoft="#E3F6EA", info="#2F6FEB", infoSoft="#E6EEFD",
+                  alerta="#C77700", alertaSoft="#FDF1DC", perigo="#D93838", perigoSoft="#FCE6E6"),
+)
+
+GRAFITE = Theme(
+    id="grafite", nome="Grafite (escuro)", escuro=True,
+    background="#0D0F14", rail="#080A0E", surface="#151820", surfaceAlt="#1B1F29",
+    border="#242936", accent="#8B8BFF", accentSoft="#23234A", onAccent="#0D0F14",
+    text="#ECEEF3", muted="#8A93A6", radius=14, fontes=_FONTES,
+    status=Status(sucesso="#3DDC84", sucessoSoft="#12301F", info="#6EA8FF", infoSoft="#16264A",
+                  alerta="#FFB547", alertaSoft="#3A2A10", perigo="#FF6B6B", perigoSoft="#3A1616"),
+)
+
+ESMERALDA = Theme(
+    id="esmeralda", nome="Esmeralda", escuro=True,
+    background="#07130F", rail="#040C09", surface="#0D1F19", surfaceAlt="#122920",
+    border="#1A3A2E", accent="#34E0A1", accentSoft="#0F3A2B", onAccent="#04140E",
+    text="#E3F7EF", muted="#7FA899", radius=18, fontes=_FONTES,
+    status=Status(sucesso="#34E0A1", sucessoSoft="#0F3A2B", info="#5CC8FF", infoSoft="#0E2E40",
+                  alerta="#F5C451", alertaSoft="#3A2F10", perigo="#FF7A7A", perigoSoft="#3D1717"),
+)
+
+AMBAR = Theme(
+    id="ambar", nome="Âmbar", escuro=False,
+    background="#FBF6EE", rail="#2A1A0A", surface="#FFFFFF", surfaceAlt="#FCF3E6",
+    border="#EFE2CF", accent="#E8730C", accentSoft="#FDEBD9", onAccent="#FFFFFF",
+    text="#2A1A0A", muted="#8C755C", radius=10, fontes=_FONTES,
+    status=Status(sucesso="#2E9E5B", sucessoSoft="#E4F4EA", info="#3B6FD9", infoSoft="#E7EEFB",
+                  alerta="#C76A00", alertaSoft="#FCEBD3", perigo="#CF3A3A", perigoSoft="#FAE3E3"),
+)
+
+THEMES: dict[str, Theme] = {t.id: t for t in (NEBLINA, GRAFITE, ESMERALDA, AMBAR)}
+
+
+def resolve_theme(theme_id: str, sistema_escuro: bool) -> Theme:
+    if theme_id == SYSTEM_ID or theme_id not in THEMES:
+        return GRAFITE if sistema_escuro else NEBLINA
+    return THEMES[theme_id]
+
+
+================================================================================
+ARQUIVO: nfe_monitor/ui/themes/theme.py
+================================================================================
+from dataclasses import asdict, dataclass
+from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class Fontes:
+    texto: str
+    titulo: str
+    mono: str
+
+
+@dataclass(frozen=True, slots=True)
+class Status:
+    sucesso: str
+    sucessoSoft: str
+    info: str
+    infoSoft: str
+    alerta: str
+    alertaSoft: str
+    perigo: str
+    perigoSoft: str
+
+
+@dataclass(frozen=True, slots=True)
+class Theme:
+    id: str
+    nome: str
+    escuro: bool
+    background: str   # fundo da janela
+    rail: str         # barra lateral
+    surface: str      # cartões
+    surfaceAlt: str   # hover / linhas alternadas
+    border: str
+    accent: str
+    accentSoft: str
+    onAccent: str     # texto sobre o accent
+    text: str
+    muted: str
+    radius: int
+    fontes: Fontes
+    status: Status
+
+    def to_qml(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+================================================================================
+ARQUIVO: nfe_monitor/ui/themes/theme_manager.py
+================================================================================
+from typing import Any
+
+from PySide6.QtCore import Property, QObject, QSettings, Qt, Signal, Slot
+from PySide6.QtGui import QGuiApplication
+
+from nfe_monitor.ui.themes.catalog import SYSTEM_ID, THEMES, resolve_theme
+
+_CHAVE = "aparencia/tema"
+
+
+class ThemeManager(QObject):
+    themeChanged = Signal()
+
+    def __init__(self, app: QGuiApplication, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._settings = QSettings()
+        self._hints = app.styleHints()
+        valor = str(self._settings.value(_CHAVE, SYSTEM_ID))
+        self._selecionado = valor if valor in THEMES else SYSTEM_ID
+        self._hints.colorSchemeChanged.connect(self._ao_mudar_sistema)
+        self._dados: dict[str, Any] = {}
+        self._aplicar()
+
+    def _sistema_escuro(self) -> bool:
+        return self._hints.colorScheme() == Qt.ColorScheme.Dark
+
+    def _aplicar(self) -> None:
+        self._dados = resolve_theme(self._selecionado, self._sistema_escuro()).to_qml()
+        self.themeChanged.emit()
+
+    def _ao_mudar_sistema(self, *_: object) -> None:
+        if self._selecionado == SYSTEM_ID:
+            self._aplicar()
+
+    @Property("QVariantMap", notify=themeChanged)
+    def t(self) -> dict[str, Any]:
+        return self._dados
+
+    @Property(str, notify=themeChanged)
+    def selecionado(self) -> str:
+        return self._selecionado
+
+    @Property("QVariantList", notify=themeChanged)
+    def opcoes(self) -> list[dict[str, str]]:
+        modo = "escuro" if self._sistema_escuro() else "claro"
+        return [{"id": SYSTEM_ID, "nome": f"Seguir o sistema ({modo})"}] + [
+            {"id": t.id, "nome": t.nome} for t in THEMES.values()
+        ]
+
+    @Slot(str)
+    def selecionar(self, theme_id: str) -> None:
+        if theme_id != SYSTEM_ID and theme_id not in THEMES:
+            return
+        self._selecionado = theme_id
+        self._settings.setValue(_CHAVE, theme_id)
+        self._aplicar()
+
+    @Slot()
+    def alternar(self) -> None:
+        """Atalho da barra lateral: percorre os temas em ciclo."""
+        ids = [SYSTEM_ID, *THEMES.keys()]
+        self.selecionar(ids[(ids.index(self._selecionado) + 1) % len(ids)])
+
+
+================================================================================
+ARQUIVO: nfe_monitor/ui/viewmodels/__init__.py
+================================================================================
+
+
+================================================================================
+ARQUIVO: nfe_monitor/ui/viewmodels/config_viewmodel.py
+================================================================================
+from pathlib import Path
+
+from PySide6.QtCore import Property, QObject, QThread, QUrl, Signal, Slot
+
+from nfe_monitor.application import empresas
+from nfe_monitor.infrastructure import certificados, preferencias
+from nfe_monitor.infrastructure.database import notas_repository as repo
+from nfe_monitor.infrastructure.database.conexao import conectar
+from nfe_monitor.infrastructure.sefaz.parametros import Config
+
+
+def _fmt_cnpj(c: str | None) -> str:
+    if not c or len(c) != 14:
+        return c or "sem CNPJ"
+    return f"{c[:2]}.{c[2:5]}.{c[5:8]}/{c[8:12]}-{c[12:]}"
+
+
+class _Tarefa(QObject):
+    concluiu = Signal(object)
+    falhou = Signal(str)
+
+    def __init__(self, funcao) -> None:
+        super().__init__()
+        self._funcao = funcao
+
+    def run(self) -> None:
+        try:
+            resultado = self._funcao()
+        except Exception as erro:  # noqa: BLE001 - repassa qualquer falha à tela
+            self.falhou.emit(str(erro))
+        else:
+            self.concluiu.emit(resultado)
+
+
+class ConfigViewModel(QObject):
+    alterado = Signal()
+    salvo = Signal()
+    erro = Signal(str)
+    cadastrado = Signal(str)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._certs: list[dict] = []
+        self._empresas: list[dict] = []
+        self._thumb = ""
+        self._pasta = ""
+        self._ocupado = False
+        self._tarefas: dict[QThread, _Tarefa] = {}
+
+    # ---------- Propriedades ----------
+    @Property("QVariantList", notify=alterado)
+    def certificados(self) -> list[dict]: return self._certs
+
+    @Property("QVariantList", notify=alterado)
+    def empresas(self) -> list[dict]: return self._empresas
+
+    @Property(str, notify=alterado)
+    def thumbprint(self) -> str: return self._thumb
+
+    @Property(str, notify=alterado)
+    def pasta(self) -> str: return self._pasta
+
+    @Property(bool, notify=alterado)
+    def ocupado(self) -> bool: return self._ocupado
+
+    # ---------- Carga ----------
+    @Slot()
+    def carregar(self) -> None:
+        prefs = preferencias.carregar()
+        self._thumb, self._pasta = prefs.thumbprint.upper(), prefs.pasta_download
+        try:
+            lista = certificados.listar()
+        except RuntimeError as e:
+            self.erro.emit(str(e))
+            lista = []
+        self._certs = [self._cert_dict(c) for c in lista]
+        self._carregar_empresas()
+        self.alterado.emit()
+
+    def _cert_dict(self, c: certificados.Certificado) -> dict:
+        marcas = []
+        if c.thumbprint == self._thumb:
+            marcas.append("ATUAL")
+        if c.vencido:
+            marcas.append("VENCIDO")
+        elif c.dias_restantes <= certificados.AVISO_DIAS:
+            marcas.append("VENCE LOGO")
+        if not c.tem_chave:
+            marcas.append("SEM CHAVE")
+        extra = f"  [{', '.join(marcas)}]" if marcas else ""
+        return {
+            "id": c.thumbprint,
+            "nome": f"{c.titular} · {_fmt_cnpj(c.cnpj)}{extra}",
+            "cnpj": _fmt_cnpj(c.cnpj),
+            "validade": f"{c.validade:%d/%m/%Y}",
+            "situacao": c.situacao,
+            "alerta": c.vencido or c.dias_restantes <= certificados.AVISO_DIAS or not c.tem_chave,
+        }
+
+    def _carregar_empresas(self) -> None:
+        try:
+            con = conectar(Config().banco)
+            try:
+                lista = repo.listar_empresas(con, somente_ativas=False)
+            finally:
+                con.close()
+        except Exception as e:  # noqa: BLE001 - mostra na tela em vez de derrubar
+            self.erro.emit(f"Não foi possível ler as empresas: {e}")
+            lista = []
+        self._empresas = [
+            {
+                "cnpj": _fmt_cnpj(e.cnpj),
+                "nome": e.razao_social or "(sem nome)",
+                "uf": e.uf or "--",
+                "completa": bool(e.completa),
+                "ativo": bool(e.ativo),
+            }
+            for e in lista
+        ]
+
+    # ---------- Cadastro ----------
+    @Slot(str, str)
+    def cadastrar(self, thumbprint: str, uf: str) -> None:
+        if self._ocupado:
+            return
+        if not thumbprint:
+            self.erro.emit("Selecione um certificado.")
+            return
+        uf = uf.strip().upper() or None
+        self._ocupado = True
+        self.alterado.emit()
+
+        thread = QThread(self)
+        tarefa = _Tarefa(lambda: empresas.cadastrar_por_certificado(
+            thumbprint, uf=uf, definir_padrao=False))
+        tarefa.moveToThread(thread)
+        thread.started.connect(tarefa.run)
+        tarefa.concluiu.connect(self._cadastro_ok)
+        tarefa.falhou.connect(self._cadastro_erro)
+        tarefa.concluiu.connect(thread.quit)
+        tarefa.falhou.connect(thread.quit)
+        thread.finished.connect(tarefa.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: self._tarefas.pop(thread, None))
+        self._tarefas[thread] = tarefa
+        thread.start()
+
+    def _cadastro_ok(self, res) -> None:
+        e = res.empresa
+        linhas = [f"✓ {'Cadastrada' if res.nova else 'Atualizada'}: "
+                  f"{e.razao_social or '(sem nome)'} ({e.uf or 'sem UF'})"]
+        linhas += [f"⚠ {a}" for a in res.avisos]
+        self._ocupado = False
+        self._carregar_empresas()
+        self.alterado.emit()
+        self.cadastrado.emit("\n".join(linhas))
+
+    def _cadastro_erro(self, mensagem: str) -> None:
+        self._ocupado = False
+        self.alterado.emit()
+        self.erro.emit(mensagem)
+
+    # ---------- Preferências ----------
+    @Slot(str, result=str)
+    def caminhoDe(self, url: str) -> str:
+        return str(Path(QUrl(url).toLocalFile()))
+
+    @Slot(str, str, result=bool)
+    def salvar(self, thumbprint: str, pasta: str) -> bool:
+        if not thumbprint:
+            self.erro.emit("Selecione um certificado.")
+            return False
+        prefs = preferencias.carregar()
+        prefs.thumbprint, prefs.pasta_download = thumbprint, pasta
+        preferencias.salvar(prefs)
+        self._thumb, self._pasta = thumbprint.upper(), pasta
+        self.alterado.emit()
+        self.salvo.emit()
+        return True
+
+
+================================================================================
+ARQUIVO: nfe_monitor/ui/viewmodels/main_viewmodel.py
+================================================================================
+import shutil
+from pathlib import Path
+
+from PySide6.QtCore import Property, QObject, QThread, QTimer, QUrl, Signal, Slot
+
+from nfe_monitor.application import limite
+from nfe_monitor.application.baixar_xml import baixar_e_copiar, caminho_livre
+from nfe_monitor.application.listar_notas import ITENS_POR_PAGINA, consultar_notas
+from nfe_monitor.application.sincronizar import sincronizar_todas
+from nfe_monitor.infrastructure import certificados, preferencias
+from nfe_monitor.infrastructure.database import notas_repository as repo
+from nfe_monitor.infrastructure.database.conexao import conectar
+from nfe_monitor.infrastructure.paths import CNPJ
+from nfe_monitor.infrastructure.sefaz.parametros import Config
+from nfe_monitor.ui.formatters import formatar_brl
+from nfe_monitor.ui.models.notas_model import NotasModel
+
+
+def _fmt_cnpj(c: str) -> str:
+    return f"{c[:2]}.{c[2:5]}.{c[5:8]}/{c[8:12]}-{c[12:]}" if len(c) == 14 else c
+
+
+class Tarefa(QObject):
+    concluiu = Signal(object)
+    falhou = Signal(str)
+
+    def __init__(self, funcao) -> None:
+        super().__init__()
+        self._funcao = funcao
+
+    def run(self) -> None:
+        try:
+            resultado = self._funcao()
+        except Exception as erro:  # noqa: BLE001 - repassa qualquer falha à tela
+            self.falhou.emit(str(erro))
+        else:
+            self.concluiu.emit(resultado)
+
+
+class MainViewModel(QObject):
+    alterado = Signal()
+    relogioChanged = Signal()
+    empresasChanged = Signal()
+    solicitarPasta = Signal(int)          # QML abre o FolderDialog
+    solicitarCiencia = Signal(int, str)   # QML confirma a manifestação
+    notificacao = Signal(str)
+    erro = Signal(str, str)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._model = NotasModel(self)
+        self._fornecedor, self._inicio, self._fim = "", None, None
+        self._pagina, self._total_paginas, self._total = 0, 1, 0
+        self._valor, self._baixados = "R$ 0,00", 0
+        self._ocupado, self._status = False, "Pronto"
+        self._cert_texto, self._cert_alerta = "Certificado não configurado", True
+        self._proxima, self._ultima, self._liberado = "", "", False
+        self._empresas: list[repo.Empresa] = []
+        self._empresa_filtro = preferencias.carregar().empresa_filtro
+        self._tarefas: dict[QThread, Tarefa] = {}
+
+        self._relogio = QTimer(self)
+        self._relogio.timeout.connect(self._tick)
+        self._relogio.start(1000)
+
+        self._carregar_empresas()
+        self.recarregar()
+        self.atualizarCertificado()
+        self._tick()
+
+    # ---------- Propriedades ----------
+    @Property(QObject, constant=True)
+    def notas(self): return self._model
+
+    @Property(str, notify=alterado)
+    def cnpj(self) -> str:
+        if self._empresa_filtro:
+            return _fmt_cnpj(self._empresa_filtro)
+        if not self._empresas:
+            return _fmt_cnpj(CNPJ)
+        if len(self._empresas) == 1:
+            return _fmt_cnpj(self._empresas[0].cnpj)
+        return f"Todas ({len(self._empresas)})"
+
+    @Property("QVariantList", notify=empresasChanged)
+    def empresasOpcoes(self) -> list:
+        opcoes = [{"id": "", "nome": f"Todas as empresas  ({len(self._empresas)})"}]
+        for e in self._empresas:
+            nome = e.razao_social or "Sem razão social"
+            opcoes.append({"id": e.cnpj, "nome": f"{nome}  ·  {_fmt_cnpj(e.cnpj)}"})
+        return opcoes
+
+    @Property(int, notify=empresasChanged)
+    def empresaIndice(self) -> int:
+        for i, e in enumerate(self._empresas, start=1):
+            if e.cnpj == self._empresa_filtro:
+                return i
+        return 0
+
+    @Property(bool, notify=empresasChanged)
+    def multiEmpresa(self) -> bool: return len(self._empresas) > 1
+
+    @Property(int, notify=alterado)
+    def pagina(self) -> int: return self._pagina + 1
+
+    @Property(int, notify=alterado)
+    def totalPaginas(self) -> int: return self._total_paginas
+
+    @Property(int, notify=alterado)
+    def totalNotas(self) -> int: return self._total
+
+    @Property(str, notify=alterado)
+    def valorTotal(self) -> str: return self._valor
+
+    @Property(int, notify=alterado)
+    def baixados(self) -> int: return self._baixados
+
+    @Property(bool, notify=alterado)
+    def ocupado(self) -> bool: return self._ocupado
+
+    @Property(str, notify=alterado)
+    def status(self) -> str: return self._status
+
+    @Property(str, notify=alterado)
+    def certTexto(self) -> str: return self._cert_texto
+
+    @Property(bool, notify=alterado)
+    def certAlerta(self) -> bool: return self._cert_alerta
+
+    @Property(bool, notify=alterado)
+    def filtrado(self) -> bool: return bool(self._fornecedor or self._inicio or self._fim)
+
+    @Property(str, notify=relogioChanged)
+    def proxima(self) -> str: return self._proxima
+
+    @Property(str, notify=relogioChanged)
+    def ultima(self) -> str: return self._ultima
+
+    @Property(bool, notify=relogioChanged)
+    def syncLiberado(self) -> bool: return self._liberado
+
+    # ---------- Internos ----------
+    def _set_status(self, texto: str, ocupado: bool | None = None) -> None:
+        self._status = texto
+        if ocupado is not None:
+            self._ocupado = ocupado
+        self.alterado.emit()
+        self._tick()
+
+    def _tick(self) -> None:
+        restante = int(limite.segundos_restantes())
+        ultima = limite.ultima_sincronizacao()
+        self._ultima = f"{ultima:%d/%m/%Y às %H:%M}" if ultima else "Nunca sincronizado"
+        if restante > 0:
+            h, r = divmod(restante, 3600)
+            m, s = divmod(r, 60)
+            self._proxima = f"{h:02d}:{m:02d}:{s:02d}"
+        else:
+            self._proxima = ""
+        self._liberado = restante == 0 and not self._ocupado
+        self.relogioChanged.emit()
+
+    def _carregar_empresas(self) -> None:
+        try:
+            con = conectar(Config().banco)
+            try:
+                self._empresas = repo.listar_empresas(con)
+            finally:
+                con.close()
+        except Exception:  # noqa: BLE001 - sem banco, mantém o CNPJ do paths
+            self._empresas = []
+
+        # Empresa salva foi desativada/removida, ou só restou uma: volta para "todas"
+        cnpjs = {e.cnpj for e in self._empresas}
+        if self._empresa_filtro and (self._empresa_filtro not in cnpjs or len(cnpjs) <= 1):
+            self._empresa_filtro = ""
+            self._salvar_filtro()
+        self.empresasChanged.emit()
+
+    def _salvar_filtro(self) -> None:
+        try:
+            p = preferencias.carregar()
+            p.empresa_filtro = self._empresa_filtro
+            preferencias.salvar(p)
+        except OSError:
+            pass  # não salvar a preferência não impede o uso
+
+    def _executar(self, funcao, ok, falha) -> None:
+        thread = QThread(self)
+        tarefa = Tarefa(funcao)
+        tarefa.moveToThread(thread)
+        thread.started.connect(tarefa.run)
+        tarefa.concluiu.connect(ok)
+        tarefa.falhou.connect(falha)
+        tarefa.concluiu.connect(thread.quit)
+        tarefa.falhou.connect(thread.quit)
+        thread.finished.connect(tarefa.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: self._tarefas.pop(thread, None))
+        self._tarefas[thread] = tarefa
+        thread.start()
+
+    def _validar_cert(self) -> bool:
+        try:
+            certificados.validar_para_uso()
+            return True
+        except RuntimeError as e:
+            self.erro.emit("Certificado", str(e))
+            return False
+
+    @staticmethod
+    def _pasta_salva() -> Path | None:
+        salva = preferencias.carregar().pasta_download
+        return Path(salva) if salva and Path(salva).is_dir() else None
+
+    # ---------- Consulta / filtros ----------
+    def _consultar(self):
+        return consultar_notas(self._fornecedor, self._inicio, self._fim,
+                               self._pagina, self._empresa_filtro or None)
+
+    @Slot()
+    def recarregar(self) -> None:
+        notas, resumo = self._consultar()
+        self._total = int(resumo["quantidade"] or 0)
+        self._total_paginas = max(1, -(-self._total // ITENS_POR_PAGINA))
+        if self._pagina >= self._total_paginas:
+            self._pagina = self._total_paginas - 1
+            notas, resumo = self._consultar()
+        self._valor = formatar_brl(resumo["valor_total"] or 0)
+        self._baixados = int(resumo["baixados"] or 0)
+        self._model.carregar(notas)
+        self.alterado.emit()
+
+    @Slot(str)
+    def selecionarEmpresa(self, cnpj: str) -> None:
+        cnpj = "".join(c for c in (cnpj or "") if c.isdigit())
+        if cnpj == self._empresa_filtro or self._ocupado:
+            self.empresasChanged.emit()  # devolve o seletor ao valor atual
+            return
+        self._empresa_filtro = cnpj
+        self._salvar_filtro()
+        self._pagina = 0
+        self.empresasChanged.emit()
+        self.recarregar()
+
+    @Slot(str, str, str)
+    def aplicarFiltros(self, fornecedor: str, inicio_iso: str, fim_iso: str) -> None:
+        self._fornecedor = fornecedor.strip()
+        self._inicio = inicio_iso or None
+        self._fim = fim_iso or None
+        self._pagina = 0
+        self.recarregar()
+
+    @Slot()
+    def limparFiltros(self) -> None:
+        self.aplicarFiltros("", "", "")
+
+    @Slot(int)
+    def irPagina(self, delta: int) -> None:
+        nova = self._pagina + delta
+        if 0 <= nova < self._total_paginas and not self._ocupado:
+            self._pagina = nova
+            self.recarregar()
+
+    # ---------- Certificado ----------
+    @Slot()
+    def atualizarCertificado(self) -> None:
+        try:
+            cert = certificados.selecionado()
+        except (RuntimeError, OSError, ValueError, KeyError):
+            cert = None
+        if cert is None:
+            self._cert_texto, self._cert_alerta = "Certificado não configurado", True
+        else:
+            self._cert_texto = f"{cert.titular.split(':')[0]} · {cert.situacao} até {cert.validade:%d/%m/%Y}"
+            self._cert_alerta = cert.dias_restantes <= certificados.AVISO_DIAS
+        self._carregar_empresas()  # chamado ao salvar as Configurações
+        self.recarregar()
+        self.alterado.emit()
+
+    # ---------- Sincronização ----------
+    @Slot()
+    def sincronizar(self) -> None:
+        if self._ocupado or limite.segundos_restantes() > 0 or not self._validar_cert():
+            return
+        limite.registrar_disparo()
+        self._set_status("Sincronizando com a SEFAZ…", True)
+        self._executar(lambda: sincronizar_todas(Config()), self._sync_ok, self._sync_erro)
+
+    def _sync_ok(self, resultados) -> None:
+        if not resultados:
+            self._set_status("Nenhuma empresa cadastrada", False)
+            self.erro.emit("Sincronização", "Cadastre uma empresa em ⚙ Configurações.")
+            return
+
+        novas = sum(r.novas for r in resultados)
+        esperas = [r for r in resultados if r.status == "espera"]
+        erros = [r for r in resultados if r.status == "erro"]
+
+        partes = [f"{novas} nova(s)"]
+        if esperas:
+            partes.append(f"{len(esperas)} em espera")
+        if erros:
+            partes.append(f"{len(erros)} com erro")
+        resumo = " · ".join(partes)
+
+        self._carregar_empresas()
+        self._set_status(f"Concluído: {resumo}", False)
+        self.recarregar()
+        self.notificacao.emit(f"✓ {resumo}")
+
+        if erros:
+            self.erro.emit("Sincronização",
+                           "\n".join(f"{_fmt_cnpj(r.cnpj)}: {r.detalhe}" for r in erros))
+
+    def _sync_erro(self, mensagem: str) -> None:
+        self._set_status("Falha na sincronização", False)
+        self.recarregar()
+        self.erro.emit("Sincronização", mensagem)
+
+    # ---------- XML ----------
+    @Slot(int)
+    def acaoXml(self, linha: int) -> None:
+        if self._ocupado or self._model.nota(linha) is None:
+            return
+        pasta = self._pasta_salva()
+        if pasta is None:
+            self.solicitarPasta.emit(linha)
+        else:
+            self._prosseguir(linha, pasta)
+
+    @Slot(int, str)
+    def continuarComPasta(self, linha: int, url: str) -> None:
+        self._prosseguir(linha, Path(QUrl(url).toLocalFile()))
+
+    def _prosseguir(self, linha: int, pasta: Path) -> None:
+        nota = self._model.nota(linha)
+        if nota is None:
+            return
+        if nota["xml_baixado"]:
+            origem = Path(nota["caminho_xml"] or "")
+            if not origem.is_file():
+                self.erro.emit("Salvar XML", f"O arquivo não foi encontrado em:\n{origem}")
+                return
+            try:
+                destino = caminho_livre(pasta, f"{nota['chave']}.xml")
+                shutil.copy2(origem, destino)
+            except OSError as e:
+                self.erro.emit("Salvar XML", f"Não foi possível salvar o arquivo:\n{e}")
+                return
+            self._set_status(f"XML salvo em {destino}")
+            self.notificacao.emit("✓ XML salvo")
+            return
+
+        if not self._validar_cert():
+            return
+        if nota["manifestacao"] != "ciencia":
+            self.solicitarCiencia.emit(linha, str(pasta))
+            return
+        self._baixar(nota["chave"], pasta)
+
+    @Slot(int, str)
+    def confirmarCiencia(self, linha: int, pasta: str) -> None:
+        nota = self._model.nota(linha)
+        if nota is not None:
+            self._baixar(nota["chave"], Path(pasta))
+
+    def _baixar(self, chave: str, pasta: Path) -> None:
+        self._set_status("Baixando XML…", True)
+        self._executar(lambda: baixar_e_copiar(chave, pasta), self._download_ok, self._download_erro)
+
+    def _download_ok(self, destino: Path) -> None:
+        self._set_status(f"XML salvo em {destino}", False)
+        self.recarregar()
+        self.notificacao.emit("✓ XML baixado e salvo")
+
+    def _download_erro(self, mensagem: str) -> None:
+        self._set_status("Falha ao baixar o XML", False)
+        self.recarregar()
+        self.erro.emit("Baixar XML", mensagem)
+
+    # ---------- Janela ----------
+    @Slot(result=bool)
+    def podeFechar(self) -> bool:
+        return not self._ocupado
+
+
+================================================================================
+ARQUIVO: nfe_monitor/ui/viewmodels/notas_model.py
+================================================================================
+from nfe_monitor.ui.models.notas_model import *  # noqa
+
+
+================================================================================
+ARQUIVO: pytest.ini
+================================================================================
+[pytest]
+testpaths = tests
+addopts = -v --basetemp=.pytest_tmp
+cache_dir = .pytest_cache
+
+
+================================================================================
+ARQUIVO: README.md
+================================================================================
+# nfe_monitor
+
+Monitor de NF-e em Python.
+
+
+================================================================================
+ARQUIVO: requirements.txt
+================================================================================
+anyio==4.16.0
+ast_serialize==0.13.1
+certifi==2026.10.23
+cffi==2.1.1
+colorama==0.4.6
+cryptography==50.0.2
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+iniconfig==2.3.1
+librt==0.16.0
+lxml==6.1.3
+mypy==2.4.1
+mypy_extensions==1.2.0
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.7.0
+pycparser==3.12
+Pygments==2.21.0
+PySide6==6.12.0
+PySide6_Addons==6.12.0
+PySide6_Essentials==6.12.0
+PySide6_Pdf==6.12.0.140
+PySide6_WebEngine==6.12.0.140
+pytest==9.2.0
+ruff==0.17.4
+shiboken6==6.12.0
+typing_extensions==4.16.0
+xsdata==26.10
+
+
+================================================================================
+ARQUIVO: tests/__init__.py
+================================================================================
+
+
+================================================================================
+ARQUIVO: tests/test_conexao.py
+================================================================================
+import sqlite3
+
+from nfe_monitor.infrastructure.database.conexao import _colunas, conectar
+
+SCHEMA_ANTIGO = """
+CREATE TABLE nfe (
+    chave TEXT PRIMARY KEY, emitente_cnpj TEXT NOT NULL, emitente_nome TEXT,
+    data_emissao TEXT, valor TEXT, situacao TEXT, protocolo TEXT,
+    manifestacao TEXT NOT NULL DEFAULT 'pendente', caminho_xml TEXT,
+    criado_em TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE TABLE controle_nsu (cnpj TEXT PRIMARY KEY, ult_nsu TEXT NOT NULL);
+INSERT INTO controle_nsu VALUES ('12345678000199', '000000000000150');
+INSERT INTO nfe (chave, emitente_cnpj, data_emissao)
+    VALUES ('CHAVE1', '11111111000111', '2026-01-10T08:00:00-03:00');
+"""
+
+
+def _banco_antigo(tmp_path):
+    caminho = tmp_path / "antigo.db"
+    con = sqlite3.connect(caminho)
+    con.executescript(SCHEMA_ANTIGO)
+    con.close()
+    return caminho
+
+
+def test_migracao_adiciona_colunas(tmp_path):
+    con = conectar(_banco_antigo(tmp_path))
+    assert {"tipo", "empresa_cnpj"} <= _colunas(con, "nfe")
+    assert {"max_nsu", "bloqueado_ate", "atualizado_em"} <= _colunas(con, "controle_nsu")
+
+
+def test_migracao_preserva_nsu_e_cria_empresa(tmp_path):
+    con = conectar(_banco_antigo(tmp_path))
+    assert con.execute("SELECT ult_nsu FROM controle_nsu").fetchone()[0] == "000000000000150"
+    assert con.execute("SELECT cnpj FROM empresas").fetchall() == [("12345678000199",)]
+
+
+def test_migracao_atribui_notas_a_empresa_unica(tmp_path):
+    con = conectar(_banco_antigo(tmp_path))
+    assert con.execute("SELECT empresa_cnpj FROM nfe").fetchone()[0] == "12345678000199"
+
+
+def test_migracao_idempotente(tmp_path):
+    caminho = _banco_antigo(tmp_path)
+    conectar(caminho).close()
+    con = conectar(caminho)  # segunda execução não pode falhar nem duplicar
+    assert con.execute("SELECT COUNT(*) FROM empresas").fetchone()[0] == 1
+
+
+================================================================================
+ARQUIVO: tests/test_distribuicao.py
+================================================================================
+import base64
+import gzip
+from decimal import Decimal
+
+from nfe_monitor.infrastructure.database.conexao import conectar
+from nfe_monitor.infrastructure.database.notas_repository import inserir_resumo
+from nfe_monitor.infrastructure.sefaz.distribuicao import ler_lote, ler_resumo
+
+RESUMO_XML = """<resNFe xmlns="http://www.portalfiscal.inf.br/nfe">
+  <chNFe>29261117471387000167550010013121891208125550</chNFe>
+  <CNPJ>17471387000167</CNPJ>
+  <xNome>FORNECEDOR EXEMPLO LTDA</xNome>
+  <dhEmi>2026-11-12T03:29:00-03:00</dhEmi>
+  <vNF>4124.82</vNF>
+  <cSitNFe>1</cSitNFe>
+  <nProt>129261609811504</nProt>
+</resNFe>"""
+
+
+def _doc_zip(xml: str) -> str:
+    return base64.b64encode(gzip.compress(xml.encode("utf-8"))).decode("ascii")
+
+
+def _resposta(cstat: str, ult: str, maximo: str, docs: list[tuple[str, str, str]]) -> str:
+    lote = "".join(
+        f'<docZip NSU="{nsu}" schema="{schema}">{_doc_zip(xml)}</docZip>'
+        for nsu, schema, xml in docs
+    )
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+  <soap:Body>
+    <nfeDistDFeInteresseResponse xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe">
+      <nfeDistDFeInteresseResult>
+        <retDistDFeInt xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.01">
+          <tpAmb>1</tpAmb><cStat>{cstat}</cStat><xMotivo>Teste</xMotivo>
+          <ultNSU>{ult}</ultNSU><maxNSU>{maximo}</maxNSU>
+          <loteDistDFeInt>{lote}</loteDistDFeInt>
+        </retDistDFeInt>
+      </nfeDistDFeInteresseResult>
+    </nfeDistDFeInteresseResponse>
+  </soap:Body>
+</soap:Envelope>"""
+
+
+def test_ler_lote_descompacta_resumo():
+    corpo = _resposta("138", "000000000000001", "000000000000001",
+                      [("000000000000001", "resNFe_v1.01.xsd", RESUMO_XML)])
+    lote = ler_lote(corpo)
+
+    assert lote.cstat == "138"
+    assert lote.docs[0].tipo == "resumo"
+
+
+def test_ler_lote_sem_documentos():
+    corpo = _resposta("137", "000000000000000", "000000000000000", [])
+    lote = ler_lote(corpo)
+
+    assert lote.cstat == "137"
+    assert lote.docs == []
+
+
+def test_ler_resumo_campos():
+    r = ler_resumo(RESUMO_XML)
+
+    assert r.chave == "29261117471387000167550010013121891208125550"
+    assert r.valor == Decimal("4124.82")
+    assert r.situacao == "1"
+
+
+def test_inserir_resumo_nao_duplica(tmp_path):
+    con = conectar(tmp_path / "teste.db")
+    try:
+        r = ler_resumo(RESUMO_XML)
+        assert inserir_resumo(con, r) is True
+        assert inserir_resumo(con, r) is False
+        assert con.execute("SELECT COUNT(*) FROM nfe").fetchone()[0] == 1
+    finally:
+        con.close()
+
+
+================================================================================
+ARQUIVO: tests/test_empresas.py
+================================================================================
+from datetime import datetime, timedelta
+
+import pytest
+
+from nfe_monitor.application import empresas
+from nfe_monitor.infrastructure import preferencias
+from nfe_monitor.infrastructure.certificados import Certificado, extrair_cnpj
+from nfe_monitor.infrastructure.database import notas_repository as repo
+from nfe_monitor.infrastructure.database.conexao import conectar
+from nfe_monitor.infrastructure.sefaz.parametros import Config
+
+CNPJ = "11444777000161"
+
+
+def _cert(dias=365, cnpj=CNPJ, thumb="ABC123"):
+    return Certificado(thumb, f"CN=EMPRESA TESTE LTDA:{cnpj}, O=ICP-Brasil",
+                       datetime.now() + timedelta(days=dias), cnpj, "EMPRESA TESTE LTDA")
+
+
+@pytest.fixture
+def cfg(tmp_path, monkeypatch):
+    monkeypatch.setattr(preferencias, "ARQUIVO", tmp_path / "config.json")
+    return Config(banco=tmp_path / "t.db", thumbprint="PADRAO")
+
+
+def _ambiente(monkeypatch, cert, api):
+    monkeypatch.setattr(empresas.certificados, "listar", lambda: [cert])
+    monkeypatch.setattr(empresas.brasilapi, "consultar_cnpj", lambda c: api)
+
+
+def _empresa(cfg):
+    con = conectar(cfg.banco)
+    try:
+        return repo.obter_empresa(con, CNPJ)
+    finally:
+        con.close()
+
+
+def test_extrair_cnpj_ecnpj():
+    assert extrair_cnpj("CN=EMPRESA X LTDA:11444777000161, OU=AC, O=ICP-Brasil") == \
+        ("11444777000161", "EMPRESA X LTDA")
+    assert extrair_cnpj("CN=Fulano, O=Teste") == (None, None)
+
+
+def test_cadastro_completo_com_brasilapi(cfg, monkeypatch):
+    _ambiente(monkeypatch, _cert(), {"razao_social": "RAZAO API", "uf": "BA"})
+    res = empresas.cadastrar_por_certificado("abc123", cfg)
+    assert res.nova and res.avisos == []
+    e = _empresa(cfg)
+    assert (e.razao_social, e.uf, e.thumbprint, e.completa) == ("RAZAO API", "BA", "ABC123", True)
+    assert preferencias.carregar().thumbprint == "ABC123"
+
+
+def test_sem_brasilapi_usa_certificado_e_avisa_uf(cfg, monkeypatch):
+    _ambiente(monkeypatch, _cert(), None)
+    res = empresas.cadastrar_por_certificado("ABC123", cfg)
+    e = _empresa(cfg)
+    assert e.razao_social == "EMPRESA TESTE LTDA" and e.uf is None
+    assert len(res.avisos) == 2
+
+
+def test_uf_informada_dispensa_api(cfg, monkeypatch):
+    _ambiente(monkeypatch, _cert(), None)
+    res = empresas.cadastrar_por_certificado("ABC123", cfg, uf="ba")
+    assert _empresa(cfg).uf == "BA" and res.avisos == []
+
+
+def test_recadastro_atualiza(cfg, monkeypatch):
+    _ambiente(monkeypatch, _cert(), {"razao_social": "X", "uf": "BA"})
+    empresas.cadastrar_por_certificado("ABC123", cfg)
+    _ambiente(monkeypatch, _cert(thumb="NOVO"), {"razao_social": "X", "uf": "BA"})
+    res = empresas.cadastrar_por_certificado("NOVO", cfg)
+    assert not res.nova and _empresa(cfg).thumbprint == "NOVO"
+
+
+def test_aviso_de_vencimento(cfg, monkeypatch):
+    _ambiente(monkeypatch, _cert(dias=10), {"razao_social": "X", "uf": "BA"})
+    res = empresas.cadastrar_por_certificado("ABC123", cfg)
+    assert any("vence" in a for a in res.avisos)
+
+
+@pytest.mark.parametrize("cert, uf", [
+    (_cert(dias=-1), None),                 # vencido
+    (_cert(cnpj="12345678000199"), None),   # CNPJ com DV errado
+    (_cert(), "ZZ"),                        # UF inválida
+])
+def test_recusas(cfg, monkeypatch, cert, uf):
+    _ambiente(monkeypatch, cert, None)
+    with pytest.raises(empresas.ErroCadastro):
+        empresas.cadastrar_por_certificado("ABC123", cfg, uf=uf)
+    assert _empresa(cfg) is None
+
+
+def test_certificado_inexistente(cfg, monkeypatch):
+    _ambiente(monkeypatch, _cert(), None)
+    with pytest.raises(empresas.ErroCadastro):
+        empresas.cadastrar_por_certificado("OUTRO", cfg)
+
+
+================================================================================
+ARQUIVO: tests/test_notas_repository.py
+================================================================================
+import pytest
+
+from nfe_monitor.infrastructure.database import notas_repository as repo
+from nfe_monitor.infrastructure.database.conexao import conectar
+
+CNPJ = "12345678000199"
+
+
+@pytest.fixture
+def con(tmp_path):
+    c = conectar(tmp_path / "teste.db")
+    yield c
+    c.close()
+
+
+def _empresa(**kw):
+    dados = dict(cnpj=CNPJ, razao_social="EMPRESA TESTE", uf="BA", thumbprint="ABC")
+    dados.update(kw)
+    return repo.Empresa(**dados)
+
+
+def test_cadastro_cria_nsu_zerado(con):
+    repo.salvar_empresa(con, _empresa())
+    assert repo.obter_empresa(con, CNPJ).c_uf_autor == "29"
+    assert repo.ler_ult_nsu(con, CNPJ) == repo.NSU_ZERO
+
+
+def test_salvar_nsu_preserva_max(con):
+    repo.salvar_empresa(con, _empresa())
+    repo.salvar_ult_nsu(con, CNPJ, "10", "500")
+    repo.salvar_ult_nsu(con, CNPJ, "20")
+    row = con.execute("SELECT ult_nsu, max_nsu FROM controle_nsu").fetchone()
+    assert row == ("000000000000020", "000000000000500")
+
+
+def test_bloqueio_656(con):
+    repo.salvar_empresa(con, _empresa())
+    repo.bloquear_empresa(con, CNPJ)
+    assert repo.bloqueada_ate(con, CNPJ) is not None
+    assert repo.empresas_prontas(con) == []
+
+
+def test_bloqueio_expirado_libera(con):
+    repo.salvar_empresa(con, _empresa())
+    repo.bloquear_empresa(con, CNPJ, minutos=-1)
+    assert [e.cnpj for e in repo.empresas_prontas(con)] == [CNPJ]
+
+
+def test_cadastro_incompleto_nao_fica_pronto(con):
+    repo.salvar_empresa(con, _empresa(uf=None, thumbprint=None))
+    assert repo.empresas_prontas(con) == []
+
+
+def test_validacoes(con):
+    with pytest.raises(ValueError):
+        repo.salvar_empresa(con, _empresa(uf="ZZ"))
+    with pytest.raises(ValueError):
+        repo.salvar_empresa(con, _empresa(cnpj="123"))
+
+
+================================================================================
+ARQUIVO: tests/test_sincronizar.py
+================================================================================
+import pytest
+
+from nfe_monitor.application import sincronizar as sinc
+from nfe_monitor.infrastructure.database import notas_repository as repo
+from nfe_monitor.infrastructure.database.conexao import conectar
+from nfe_monitor.infrastructure.sefaz.distribuicao import Lote
+from nfe_monitor.infrastructure.sefaz.parametros import Config
+
+A, B, C = "11444777000161", "11222333000181", "33000167000101"
+FIM = Lote("137", "Nenhum", "0" * 15, "0" * 15)
+
+
+@pytest.fixture
+def cfg(tmp_path):
+    cfg = Config(banco=tmp_path / "t.db", thumbprint="PADRAO")
+    con = conectar(cfg.banco)
+    with con:
+        repo.salvar_empresa(con, repo.Empresa(A, "A", "BA", "TA"))
+        repo.salvar_empresa(con, repo.Empresa(B, "B", "SP", "TB"))
+    con.close()
+    return cfg
+
+
+def _sefaz(monkeypatch, respostas: dict):
+    """respostas: cnpj -> Lote. Guarda o Config usado em cada chamada."""
+    usados = {}
+
+    def consultar(cnpj, ult, cfg):
+        usados[cnpj] = cfg
+        return cnpj
+    monkeypatch.setattr(sinc.cliente, "consultar", consultar)
+    monkeypatch.setattr(sinc.distribuicao, "ler_lote", lambda corpo: respostas[corpo])
+    return usados
+
+
+def _bloqueada(cfg, cnpj):
+    con = conectar(cfg.banco)
+    try:
+        return repo.bloqueada_ate(con, cnpj) is not None
+    finally:
+        con.close()
+
+
+def test_cnpj_valido():
+    assert sinc.cnpj_valido(A) and sinc.cnpj_valido(B) and sinc.cnpj_valido(C)
+    assert not sinc.cnpj_valido("12345678000199")
+    assert not sinc.cnpj_valido("00000000000000")
+
+
+def test_cnpj_invalido_nao_chama_sefaz(cfg, monkeypatch):
+    usados = _sefaz(monkeypatch, {})
+    with pytest.raises(sinc.CnpjInvalido):
+        sinc.sincronizar("12345678000199", cfg, forcar=True)
+    with pytest.raises(sinc.CnpjInvalido):
+        sinc.sincronizar(C, cfg, forcar=True)  # válido, mas não cadastrado
+    assert usados == {}
+
+
+def test_usa_certificado_e_uf_de_cada_empresa(cfg, monkeypatch):
+    usados = _sefaz(monkeypatch, {A: FIM, B: FIM})
+    sinc.sincronizar_todas(cfg)
+    assert (usados[A].thumbprint, usados[A].uf_autor) == ("TA", "29")
+    assert (usados[B].thumbprint, usados[B].uf_autor) == ("TB", "35")
+
+
+def test_656_bloqueia_so_a_empresa(cfg, monkeypatch):
+    _sefaz(monkeypatch, {A: Lote("656", "Consumo indevido", None, None), B: FIM})
+    res = {r.cnpj: r.status for r in sinc.sincronizar_todas(cfg)}
+    assert res == {A: "espera", B: "ok"}
+    assert _bloqueada(cfg, A)
+
+
+def test_fim_da_fila_pausa_1h(cfg, monkeypatch):
+    _sefaz(monkeypatch, {A: Lote("138", "Ok", "5".zfill(15), "5".zfill(15))})
+    sinc.sincronizar(A, cfg)
+    assert _bloqueada(cfg, A)
+    with pytest.raises(sinc.EsperaSefaz):
+        sinc.sincronizar(A, cfg)
+
+
+def test_cadastro_incompleto_usa_config_padrao(cfg, monkeypatch):
+    con = conectar(cfg.banco)
+    with con:
+        repo.salvar_empresa(con, repo.Empresa(C))
+    con.close()
+    usados = _sefaz(monkeypatch, {C: FIM})
+    sinc.sincronizar(C, cfg)
+    assert (usados[C].thumbprint, usados[C].uf_autor) == ("PADRAO", "29")
+
+
+================================================================================
+ARQUIVO: tests/teste_certificados.py
+================================================================================
+"""Teste da camada de certificados do Windows.
+
+Somente leitura: lista os certificados do repositório Pessoal do usuário
+atual, extrai o CNPJ, a validade e confirma se há chave privada.
+Não faz chamadas de rede e não usa senha.
+"""
+import ctypes
+import re
+import sys
+from ctypes import wintypes
+from datetime import datetime, timezone
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.x509.oid import ExtensionOID, NameOID, ObjectIdentifier
+
+if sys.platform != "win32":
+    raise SystemExit("Este teste só roda no Windows.")
+
+crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+
+CERT_SYSTEM_STORE_CURRENT_USER = 0x00010000
+CERT_STORE_READONLY_FLAG = 0x00008000
+CERT_STORE_PROV_SYSTEM_W = 10
+CERT_KEY_PROV_INFO_PROP_ID = 2
+OID_CNPJ = ObjectIdentifier("2.16.76.1.3.3")
+
+
+class CERT_CONTEXT(ctypes.Structure):
+    _fields_ = [
+        ("dwCertEncodingType", wintypes.DWORD),
+        ("pbCertEncoded", ctypes.c_void_p),
+        ("cbCertEncoded", wintypes.DWORD),
+        ("pCertInfo", ctypes.c_void_p),
+        ("hCertStore", ctypes.c_void_p),
+    ]
+
+
+crypt32.CertOpenStore.argtypes = [
+    ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.c_wchar_p,
+]
+crypt32.CertOpenStore.restype = ctypes.c_void_p
+
+crypt32.CertEnumCertificatesInStore.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+crypt32.CertEnumCertificatesInStore.restype = ctypes.c_void_p
+
+crypt32.CertGetCertificateContextProperty.argtypes = [
+    ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD),
+]
+crypt32.CertGetCertificateContextProperty.restype = wintypes.BOOL
+
+crypt32.CertCloseStore.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+crypt32.CertCloseStore.restype = wintypes.BOOL
+
+
+def tem_chave_privada(contexto: int) -> bool:
+    tamanho = wintypes.DWORD(0)
+    return bool(crypt32.CertGetCertificateContextProperty(
+        contexto, CERT_KEY_PROV_INFO_PROP_ID, None, ctypes.byref(tamanho),
+    ))
+
+
+def extrair_cnpj(certificado: x509.Certificate) -> str | None:
+    try:
+        san = certificado.extensions.get_extension_for_oid(
+            ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+        ).value
+    except x509.ExtensionNotFound:
+        return None
+    for nome in san:
+        if isinstance(nome, x509.OtherName) and nome.type_id == OID_CNPJ:
+            achados = re.findall(rb"\d{14}", nome.value)
+            if achados:
+                return achados[0].decode()
+    return None
+
+
+def listar_certificados() -> list[tuple[x509.Certificate, bool]]:
+    loja = crypt32.CertOpenStore(
+        CERT_STORE_PROV_SYSTEM_W, 0, None,
+        CERT_SYSTEM_STORE_CURRENT_USER | CERT_STORE_READONLY_FLAG, "MY",
+    )
+    if not loja:
+        raise OSError(ctypes.get_last_error(), "Falha ao abrir o repositório MY.")
+
+    encontrados = []
+    try:
+        contexto = crypt32.CertEnumCertificatesInStore(loja, None)
+        while contexto:
+            ctx = ctypes.cast(contexto, ctypes.POINTER(CERT_CONTEXT)).contents
+            der = ctypes.string_at(ctx.pbCertEncoded, ctx.cbCertEncoded)
+            cert = x509.load_der_x509_certificate(der)
+            encontrados.append((cert, tem_chave_privada(contexto)))
+            contexto = crypt32.CertEnumCertificatesInStore(loja, contexto)
+    finally:
+        crypt32.CertCloseStore(loja, 0)
+    return encontrados
+
+
+def nome_comum(nome: x509.Name) -> str:
+    atributos = nome.get_attributes_for_oid(NameOID.COMMON_NAME)
+    return atributos[0].value if atributos else nome.rfc4514_string()
+
+
+def mascarar_cnpj(cnpj: str | None) -> str:
+    if not cnpj:
+        return "não encontrado"
+    return f"{cnpj[:2]}.***.***/****-{cnpj[-2:]}"
+
+
+def main() -> None:
+    agora = datetime.now(timezone.utc)
+    certificados = listar_certificados()
+    print(f"Certificados no repositório Pessoal do usuário: {len(certificados)}\n")
+
+    for i, (cert, tem_chave) in enumerate(certificados, start=1):
+        dias = (cert.not_valid_after_utc - agora).days
+        print(f"[{i}] {nome_comum(cert.subject)}")
+        print(f"    CNPJ:            {mascarar_cnpj(extrair_cnpj(cert))}")
+        print(f"    Emissor:         {nome_comum(cert.issuer)}")
+        print(f"    Validade até:    {cert.not_valid_after_utc:%d/%m/%Y} ({dias} dias)")
+        print(f"    Chave privada:   {'sim' if tem_chave else 'NÃO (não serve para mTLS)'}")
+        print(f"    Thumbprint:      {cert.fingerprint(hashes.SHA1()).hex()[:8]}...")
+        print()
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+ARQUIVO: tests/teste_distribuicao_hom.py
+================================================================================
+"""Consulta de status ao NFeDistribuicaoDFe em homologação (tpAmb=2).
+
+Localiza o certificado no repositório Pessoal do usuário pelo CNPJ e envia
+UMA requisição com distNSU=0 via WinHTTP (Schannel). Não grava nada.
+
+Uso (na raiz do projeto):
+    python tests\\teste_distribuicao_hom.py --cnpj 00000000000000
+"""
+import argparse
+import ctypes
+import re
+import sys
+from ctypes import wintypes
+
+from cryptography import x509
+from cryptography.x509.oid import ExtensionOID, ObjectIdentifier
+
+if sys.platform != "win32":
+    raise SystemExit("Este teste só roda no Windows.")
+
+crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+winhttp = ctypes.WinDLL("winhttp", use_last_error=True)
+
+HANDLE = ctypes.c_void_p
+DWORD = wintypes.DWORD
+BOOL = wintypes.BOOL
+
+# Constantes do Windows
+CERT_STORE_PROV_SYSTEM_W = 10
+CERT_SYSTEM_STORE_CURRENT_USER = 0x00010000
+CERT_STORE_READONLY_FLAG = 0x00008000
+CERT_KEY_PROV_INFO_PROP_ID = 2
+WINHTTP_ACCESS_TYPE_DEFAULT_PROXY = 0
+WINHTTP_FLAG_SECURE = 0x00800000
+WINHTTP_OPTION_CLIENT_CERT_CONTEXT = 105
+WINHTTP_OPTION_SECURE_PROTOCOLS = 84
+WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 = 0x00000800
+WINHTTP_QUERY_STATUS_CODE = 19
+WINHTTP_QUERY_FLAG_NUMBER = 0x20000000
+
+HOST = "hom1.nfe.fazenda.gov.br"
+CAMINHO = "/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx"
+ACTION = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse"
+OID_CNPJ = ObjectIdentifier("2.16.76.1.3.3")
+
+
+class CERT_CONTEXT(ctypes.Structure):
+    _fields_ = [
+        ("dwCertEncodingType", DWORD),
+        ("pbCertEncoded", ctypes.c_void_p),
+        ("cbCertEncoded", DWORD),
+        ("pCertInfo", ctypes.c_void_p),
+        ("hCertStore", ctypes.c_void_p),
+    ]
+
+
+# --- Assinaturas do crypt32 ---
+crypt32.CertOpenStore.argtypes = [
+    ctypes.c_void_p, DWORD, ctypes.c_void_p, DWORD, wintypes.LPCWSTR,
+]
+crypt32.CertOpenStore.restype = HANDLE
+crypt32.CertEnumCertificatesInStore.argtypes = [HANDLE, HANDLE]
+crypt32.CertEnumCertificatesInStore.restype = HANDLE
+crypt32.CertDuplicateCertificateContext.argtypes = [HANDLE]
+crypt32.CertDuplicateCertificateContext.restype = HANDLE
+crypt32.CertFreeCertificateContext.argtypes = [HANDLE]
+crypt32.CertFreeCertificateContext.restype = BOOL
+crypt32.CertCloseStore.argtypes = [HANDLE, DWORD]
+crypt32.CertCloseStore.restype = BOOL
+crypt32.CertGetCertificateContextProperty.argtypes = [
+    HANDLE, DWORD, ctypes.c_void_p, ctypes.POINTER(DWORD),
+]
+crypt32.CertGetCertificateContextProperty.restype = BOOL
+
+# --- Assinaturas do winhttp ---
+winhttp.WinHttpOpen.argtypes = [
+    wintypes.LPCWSTR, DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, DWORD,
+]
+winhttp.WinHttpOpen.restype = HANDLE
+winhttp.WinHttpSetTimeouts.argtypes = [HANDLE, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+winhttp.WinHttpSetTimeouts.restype = BOOL
+winhttp.WinHttpConnect.argtypes = [HANDLE, wintypes.LPCWSTR, wintypes.WORD, DWORD]
+winhttp.WinHttpConnect.restype = HANDLE
+winhttp.WinHttpOpenRequest.argtypes = [
+    HANDLE, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR,
+    wintypes.LPCWSTR, ctypes.c_void_p, DWORD,
+]
+winhttp.WinHttpOpenRequest.restype = HANDLE
+winhttp.WinHttpSetOption.argtypes = [HANDLE, DWORD, ctypes.c_void_p, DWORD]
+winhttp.WinHttpSetOption.restype = BOOL
+winhttp.WinHttpSendRequest.argtypes = [
+    HANDLE, wintypes.LPCWSTR, DWORD, ctypes.c_void_p, DWORD, DWORD, ctypes.c_void_p,
+]
+winhttp.WinHttpSendRequest.restype = BOOL
+winhttp.WinHttpReceiveResponse.argtypes = [HANDLE, ctypes.c_void_p]
+winhttp.WinHttpReceiveResponse.restype = BOOL
+winhttp.WinHttpQueryHeaders.argtypes = [
+    HANDLE, DWORD, wintypes.LPCWSTR, ctypes.c_void_p, ctypes.POINTER(DWORD), ctypes.c_void_p,
+]
+winhttp.WinHttpQueryHeaders.restype = BOOL
+winhttp.WinHttpQueryDataAvailable.argtypes = [HANDLE, ctypes.POINTER(DWORD)]
+winhttp.WinHttpQueryDataAvailable.restype = BOOL
+winhttp.WinHttpReadData.argtypes = [HANDLE, ctypes.c_void_p, DWORD, ctypes.POINTER(DWORD)]
+winhttp.WinHttpReadData.restype = BOOL
+winhttp.WinHttpCloseHandle.argtypes = [HANDLE]
+winhttp.WinHttpCloseHandle.restype = BOOL
+
+
+def erro_win(operacao: str) -> OSError:
+    codigo = ctypes.get_last_error()
+    return OSError(codigo, f"{operacao} falhou (código Windows {codigo})")
+
+
+def tem_chave_privada(contexto: int) -> bool:
+    tamanho = DWORD(0)
+    return bool(crypt32.CertGetCertificateContextProperty(
+        contexto, CERT_KEY_PROV_INFO_PROP_ID, None, ctypes.byref(tamanho),
+    ))
+
+
+def extrair_cnpj(certificado: x509.Certificate) -> str | None:
+    try:
+        san = certificado.extensions.get_extension_for_oid(
+            ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+        ).value
+    except x509.ExtensionNotFound:
+        return None
+    for nome in san:
+        if isinstance(nome, x509.OtherName) and nome.type_id == OID_CNPJ:
+            achados = re.findall(rb"\d{14}", nome.value)
+            if achados:
+                return achados[0].decode()
+    return None
+
+
+def localizar_certificado(cnpj: str) -> int:
+    """Retorna um CERT_CONTEXT duplicado (liberar com CertFreeCertificateContext)."""
+    loja = crypt32.CertOpenStore(
+        CERT_STORE_PROV_SYSTEM_W, 0, None,
+        CERT_SYSTEM_STORE_CURRENT_USER | CERT_STORE_READONLY_FLAG, "MY",
+    )
+    if not loja:
+        raise erro_win("CertOpenStore")
+    try:
+        ctx = crypt32.CertEnumCertificatesInStore(loja, None)
+        while ctx:
+            info = ctypes.cast(ctx, ctypes.POINTER(CERT_CONTEXT)).contents
+            der = ctypes.string_at(info.pbCertEncoded, info.cbCertEncoded)
+            certificado = x509.load_der_x509_certificate(der)
+            if extrair_cnpj(certificado) == cnpj and tem_chave_privada(ctx):
+                escolhido = crypt32.CertDuplicateCertificateContext(ctx)
+                crypt32.CertFreeCertificateContext(ctx)
+                return escolhido
+            ctx = crypt32.CertEnumCertificatesInStore(loja, ctx)
+        raise LookupError(
+            f"Nenhum certificado com chave privada para o CNPJ {cnpj[:2]}***********"
+        )
+    finally:
+        crypt32.CertCloseStore(loja, 0)
+
+
+def montar_envelope(cnpj: str, uf: str) -> bytes:
+    xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                 xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                 xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <nfeDistDFeInteresse xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe">
+      <nfeDadosMsg>
+        <distDFeInt xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.01">
+          <tpAmb>2</tpAmb>
+          <cUFAutor>{uf}</cUFAutor>
+          <CNPJ>{cnpj}</CNPJ>
+          <distNSU>
+            <ultNSU>000000000000000</ultNSU>
+          </distNSU>
+        </distDFeInt>
+      </nfeDadosMsg>
+    </nfeDistDFeInteresse>
+  </soap12:Body>
+</soap12:Envelope>"""
+    return xml.encode("utf-8")
+
+
+def enviar(corpo: bytes, cert_ctx: int) -> tuple[int, bytes]:
+    sessao = winhttp.WinHttpOpen(
+        "nfe_monitor/teste", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, None, None, 0,
+    )
+    if not sessao:
+        raise erro_win("WinHttpOpen")
+    try:
+        protocolos = DWORD(WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2)
+        winhttp.WinHttpSetOption(
+            sessao, WINHTTP_OPTION_SECURE_PROTOCOLS,
+            ctypes.addressof(protocolos), ctypes.sizeof(protocolos),
+        )
+        winhttp.WinHttpSetTimeouts(sessao, 15000, 15000, 30000, 60000)
+
+        conexao = winhttp.WinHttpConnect(sessao, HOST, 443, 0)
+        if not conexao:
+            raise erro_win("WinHttpConnect")
+        try:
+            req = winhttp.WinHttpOpenRequest(
+                conexao, "POST", CAMINHO, None, None, None, WINHTTP_FLAG_SECURE,
+            )
+            if not req:
+                raise erro_win("WinHttpOpenRequest")
+            try:
+                if not winhttp.WinHttpSetOption(
+                    req, WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
+                    cert_ctx, 0,
+                ):
+                    raise erro_win("WinHttpSetOption(certificado de cliente)")
+
+                cabecalhos = (
+                    "Content-Type: application/soap+xml; charset=utf-8; "
+                    f'action="{ACTION}"'
+                )
+                if not winhttp.WinHttpSendRequest(
+                    req, cabecalhos, 0xFFFFFFFF, corpo, len(corpo), len(corpo), None,
+                ):
+                    raise erro_win("WinHttpSendRequest")
+                if not winhttp.WinHttpReceiveResponse(req, None):
+                    raise erro_win("WinHttpReceiveResponse")
+
+                status = DWORD(0)
+                tamanho = DWORD(ctypes.sizeof(status))
+                winhttp.WinHttpQueryHeaders(
+                    req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, None,
+                    ctypes.addressof(status), ctypes.byref(tamanho), None,
+                )
+
+                resposta = bytearray()
+                disponivel = DWORD(0)
+                while True:
+                    if not winhttp.WinHttpQueryDataAvailable(req, ctypes.byref(disponivel)):
+                        raise erro_win("WinHttpQueryDataAvailable")
+                    if disponivel.value == 0:
+                        break
+                    buf = ctypes.create_string_buffer(disponivel.value)
+                    lidos = DWORD(0)
+                    if not winhttp.WinHttpReadData(
+                        req, buf, disponivel.value, ctypes.byref(lidos),
+                    ):
+                        raise erro_win("WinHttpReadData")
+                    resposta += buf.raw[: lidos.value]
+                return status.value, bytes(resposta)
+            finally:
+                winhttp.WinHttpCloseHandle(req)
+        finally:
+            winhttp.WinHttpCloseHandle(conexao)
+    finally:
+        winhttp.WinHttpCloseHandle(sessao)
+
+
+def resumir(corpo: bytes) -> None:
+    texto = corpo.decode("utf-8", errors="replace")
+    cstat = re.search(r"<cStat>(\d+)</cStat>", texto)
+    motivo = re.search(r"<xMotivo>(.*?)</xMotivo>", texto, re.S)
+    ult = re.search(r"<ultNSU>(\d+)</ultNSU>", texto)
+    print(f"  cStat:    {cstat.group(1) if cstat else 'não encontrado'}")
+    print(f"  xMotivo:  {motivo.group(1).strip() if motivo else 'não encontrado'}")
+    print(f"  ultNSU:   {ult.group(1) if ult else 'não encontrado'}")
+    print("\nTrecho inicial da resposta:")
+    print(texto[:800])
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Status do NFeDistribuicaoDFe em homologação.")
+    parser.add_argument("--cnpj", required=True, help="CNPJ da empresa (14 dígitos)")
+    parser.add_argument("--uf", default="29", help="Código IBGE da UF (BA = 29)")
+    args = parser.parse_args()
+
+    cnpj = re.sub(r"\D", "", args.cnpj)
+    if len(cnpj) != 14:
+        raise SystemExit("CNPJ deve ter 14 dígitos.")
+
+    print("Localizando certificado no repositório...")
+    cert_ctx = localizar_certificado(cnpj)
+    try:
+        print(f"Enviando consulta para {HOST} (tpAmb=2, distNSU=0)...")
+        status, corpo = enviar(montar_envelope(cnpj, args.uf), cert_ctx)
+    finally:
+        crypt32.CertFreeCertificateContext(cert_ctx)
+
+    print(f"\nHTTP {status}")
+    resumir(corpo)
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+ARQUIVO: tests/teste_distribuicao_ps.py
+================================================================================
+"""Consulta de status ao NFeDistribuicaoDFe em homologação (tpAmb=2, distNSU=0).
+
+Usa o PowerShell (Invoke-WebRequest -Certificate) para fazer o mTLS com o
+certificado do repositório do usuário. Uma única chamada, sem gravação.
+
+Uso:
+    python tests\\teste_distribuicao_ps.py --cnpj 00000000000000
+"""
+import argparse
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+URL = "https://hom1.nfe.fazenda.gov.br/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx"
+ACTION = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse"
+SCRIPT = Path(__file__).with_name("envia_soap.ps1")
+
+
+def montar_envelope(cnpj: str, uf: str) -> str:
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                 xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                 xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <nfeDistDFeInteresse xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe">
+      <nfeDadosMsg>
+        <distDFeInt xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.01">
+          <tpAmb>2</tpAmb>
+          <cUFAutor>{uf}</cUFAutor>
+          <CNPJ>{cnpj}</CNPJ>
+          <distNSU>
+            <ultNSU>000000000000000</ultNSU>
+          </distNSU>
+        </distDFeInt>
+      </nfeDadosMsg>
+    </nfeDistDFeInteresse>
+  </soap12:Body>
+</soap12:Envelope>"""
+
+
+def main() -> None:
+    if sys.platform != "win32":
+        raise SystemExit("Este teste só roda no Windows.")
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cnpj", required=True)
+    parser.add_argument("--uf", default="29")
+    args = parser.parse_args()
+
+    cnpj = re.sub(r"\D", "", args.cnpj)
+    if len(cnpj) != 14:
+        raise SystemExit("CNPJ deve ter 14 dígitos.")
+
+    with tempfile.TemporaryDirectory() as pasta:
+        entrada = Path(pasta) / "entrada.xml"
+        saida = Path(pasta) / "saida.txt"
+        entrada.write_text(montar_envelope(cnpj, args.uf), encoding="utf-8")
+
+        resultado = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", str(SCRIPT),
+                "-Cnpj", cnpj, "-Url", URL,
+                "-ArquivoEntrada", str(entrada),
+                "-ArquivoSaida", str(saida),
+                "-SoapAction", ACTION,
+            ],
+            capture_output=True, text=True,
+        )
+        if resultado.returncode != 0:
+            raise SystemExit(f"Falha no PowerShell:\n{resultado.stdout}{resultado.stderr}")
+
+        texto = saida.read_text(encoding="utf-8")
+
+    linha_status, _, corpo = texto.partition("\n")
+    print(linha_status)
+    cstat = re.search(r"<cStat>(\d+)</cStat>", corpo)
+    motivo = re.search(r"<xMotivo>(.*?)</xMotivo>", corpo, re.S)
+    print(f"cStat:   {cstat.group(1) if cstat else 'não encontrado'}")
+    print(f"xMotivo: {motivo.group(1).strip() if motivo else 'não encontrado'}")
+    print("\nTrecho da resposta:")
+    print(corpo[:800])
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+ARQUIVO: tools/gerar_snapshot.py
+================================================================================
+"""
+Gera um único arquivo com a estrutura e o conteúdo do projeto,
+pronto para ser enviado a uma IA.
+
+Uso:
+    python tools/gerar_snapshot.py
+    python tools/gerar_snapshot.py --saida snapshot.txt --max-kb 200
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+RAIZ = Path(__file__).resolve().parent.parent
+
+PASTAS_IGNORADAS = {
+    ".venv", "venv", ".git", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", ".idea", ".vscode",
+    "build", "dist", "htmlcov", ".tox", "node_modules",
+}
+
+EXTENSOES_INCLUIDAS = {
+    ".py", ".toml", ".cfg", ".ini", ".md", ".txt",
+    ".yaml", ".yml", ".json", ".spec",
+}
+
+ARQUIVOS_IGNORADOS = {"snapshot_projeto.txt", ".coverage"}
+
+
+def deve_ignorar(caminho: Path) -> bool:
+    partes = set(caminho.relative_to(RAIZ).parts)
+    if partes & PASTAS_IGNORADAS:
+        return True
+    if any(p.endswith(".egg-info") for p in partes):
+        return True
+    return caminho.name in ARQUIVOS_IGNORADOS
+
+
+def gerar_arvore(arquivos: list[Path]) -> str:
+    linhas = [f"{RAIZ.name}/"]
+    for arquivo in arquivos:
+        relativo = arquivo.relative_to(RAIZ)
+        nivel = len(relativo.parts) - 1
+        linhas.append(f"{'    ' * nivel}{relativo.name}")
+    return "\n".join(linhas)
+
+
+def coletar_arquivos() -> list[Path]:
+    return sorted(
+        p for p in RAIZ.rglob("*")
+        if p.is_file()
+        and not deve_ignorar(p)
+        and p.suffix.lower() in EXTENSOES_INCLUIDAS
+    )
+
+
+def ler_conteudo(arquivo: Path, max_bytes: int) -> str:
+    if arquivo.stat().st_size > max_bytes:
+        return f"[arquivo omitido: maior que {max_bytes // 1024} KB]"
+    try:
+        return arquivo.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return arquivo.read_text(encoding="latin-1")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--saida", default="snapshot_projeto.txt")
+    parser.add_argument("--max-kb", type=int, default=200)
+    args = parser.parse_args()
+
+    arquivos = coletar_arquivos()
+    saida = RAIZ / args.saida
+    max_bytes = args.max_kb * 1024
+
+    with saida.open("w", encoding="utf-8") as f:
+        f.write("# ESTRUTURA DO PROJETO\n\n")
+        f.write(gerar_arvore(arquivos))
+        f.write("\n\n# CONTEÚDO DOS ARQUIVOS\n")
+
+        for arquivo in arquivos:
+            relativo = arquivo.relative_to(RAIZ).as_posix()
+            f.write(f"\n\n{'=' * 80}\n")
+            f.write(f"ARQUIVO: {relativo}\n")
+            f.write(f"{'=' * 80}\n")
+            f.write(ler_conteudo(arquivo, max_bytes))
+
+    tamanho_kb = saida.stat().st_size / 1024
+    print(f"✔ {len(arquivos)} arquivos -> {saida.name} ({tamanho_kb:.1f} KB)")
+
+
+if __name__ == "__main__":
+    main()
