@@ -5,3 +5,4 @@ certs/
 __pycache__/
 *.db
 .venv/
+.pytest_tmp/

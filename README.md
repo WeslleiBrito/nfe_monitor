@@ -97,7 +97,7 @@ Quando você salva as configurações, o sinal `config.salvo` chama `viewModel.a
 ### 1. Clonar o projeto
 
 ```bash
-git clone <url-do-repositorio> nfe-monitor
+git clone https://github.com/WeslleiBrito/nfe_monitor.git
 cd nfe-monitor
 ```
 
