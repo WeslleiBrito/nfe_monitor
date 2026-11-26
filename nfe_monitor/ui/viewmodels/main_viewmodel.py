@@ -1,23 +1,60 @@
+import logging
 import shutil
 from pathlib import Path
 
 from PySide6.QtCore import Property, QObject, QThread, QTimer, QUrl, Signal, Slot
 
 from nfe_monitor.application import limite
-from nfe_monitor.application.baixar_xml import baixar_e_copiar, caminho_livre
+from nfe_monitor.application.baixar_xml import (
+    ChaveInvalida, analisar_chave, baixar_e_copiar, baixar_por_chave, caminho_livre,
+    extrair_chave, situacao_chave,
+)
 from nfe_monitor.application.listar_notas import ITENS_POR_PAGINA, consultar_notas
-from nfe_monitor.application.sincronizar import sincronizar_todas
+from nfe_monitor.application.sincronizar import EsperaSefaz, Resultado
+from nfe_monitor.application.sincronizar import sincronizar as sincronizar_empresa
 from nfe_monitor.infrastructure import certificados, preferencias
 from nfe_monitor.infrastructure.database import notas_repository as repo
 from nfe_monitor.infrastructure.database.conexao import conectar
-from nfe_monitor.infrastructure.paths import CNPJ
 from nfe_monitor.infrastructure.sefaz.parametros import Config
 from nfe_monitor.ui.formatters import formatar_brl
 from nfe_monitor.ui.models.notas_model import NotasModel
 
+log = logging.getLogger("nfe_monitor")
+
+SEM_EMPRESA = "não cadastrado"
+
 
 def _fmt_cnpj(c: str) -> str:
     return f"{c[:2]}.{c[2:5]}.{c[5:8]}/{c[8:12]}-{c[12:]}" if len(c) == 14 else c
+
+
+def _problema_cert(thumb: str, indice: dict) -> str | None:
+    """Motivo pelo qual o certificado não pode ser usado, ou None se estiver ok."""
+    if not thumb:
+        return "nenhum certificado definido (nem o padrão)"
+    cert = indice.get(thumb)
+    if cert is None:
+        return "certificado não está instalado no Windows"
+    if cert.vencido:
+        return f"certificado venceu em {cert.validade:%d/%m/%Y}"
+    return None
+
+
+def _sincronizar_lista(cnpjs: list[str], bloqueadas: list[Resultado]) -> list[Resultado]:
+    """Roda na thread: sincroniza só as empresas com certificado válido."""
+    cfg = Config()
+    resultados = []
+    for cnpj in cnpjs:
+        res = Resultado(cnpj)
+        try:
+            res.novas = sincronizar_empresa(cnpj, cfg)
+        except EsperaSefaz as e:
+            res.status, res.detalhe = "espera", str(e)
+        except Exception as e:  # noqa: BLE001 - uma falha não interrompe as demais
+            res.status, res.detalhe = "erro", str(e)
+            log.exception("Falha ao sincronizar %s", cnpj)
+        resultados.append(res)
+    return resultados + bloqueadas
 
 
 class Tarefa(QObject):
@@ -41,8 +78,12 @@ class MainViewModel(QObject):
     alterado = Signal()
     relogioChanged = Signal()
     empresasChanged = Signal()
-    solicitarPasta = Signal(int)          # QML abre o FolderDialog
-    solicitarCiencia = Signal(int, str)   # QML confirma a manifestação
+    chaveChanged = Signal()
+    solicitarPasta = Signal(int)                 # QML abre o FolderDialog
+    solicitarCiencia = Signal(int, str)          # QML confirma a manifestação
+    solicitarPastaChave = Signal(str)            # idem, para download por chave
+    solicitarCienciaChave = Signal(str, str)
+    chaveConcluida = Signal()                    # QML limpa o campo da chave
     notificacao = Signal(str)
     erro = Signal(str, str)
 
@@ -58,6 +99,9 @@ class MainViewModel(QObject):
         self._empresas: list[repo.Empresa] = []
         self._empresa_filtro = preferencias.carregar().empresa_filtro
         self._tarefas: dict[QThread, Tarefa] = {}
+        self._chave_info = None
+        self._chave_msg = ""
+        self._cnpj_da_chave: dict[str, str] = {}
 
         self._relogio = QTimer(self)
         self._relogio.timeout.connect(self._tick)
@@ -77,7 +121,7 @@ class MainViewModel(QObject):
         if self._empresa_filtro:
             return _fmt_cnpj(self._empresa_filtro)
         if not self._empresas:
-            return _fmt_cnpj(CNPJ)
+            return SEM_EMPRESA
         if len(self._empresas) == 1:
             return _fmt_cnpj(self._empresas[0].cnpj)
         return f"Todas ({len(self._empresas)})"
@@ -139,6 +183,12 @@ class MainViewModel(QObject):
     @Property(bool, notify=relogioChanged)
     def syncLiberado(self) -> bool: return self._liberado
 
+    @Property(str, notify=chaveChanged)
+    def chavePrevia(self) -> str: return self._chave_msg
+
+    @Property(bool, notify=chaveChanged)
+    def chaveValida(self) -> bool: return self._chave_info is not None
+
     # ---------- Internos ----------
     def _set_status(self, texto: str, ocupado: bool | None = None) -> None:
         self._status = texto
@@ -167,7 +217,7 @@ class MainViewModel(QObject):
                 self._empresas = repo.listar_empresas(con)
             finally:
                 con.close()
-        except Exception:  # noqa: BLE001 - sem banco, mantém o CNPJ do paths
+        except Exception:  # noqa: BLE001 - sem banco, a tela mostra "não cadastrado"
             self._empresas = []
 
         # Empresa salva foi desativada/removida, ou só restou uma: volta para "todas"
@@ -176,6 +226,7 @@ class MainViewModel(QObject):
             self._empresa_filtro = ""
             self._salvar_filtro()
         self.empresasChanged.emit()
+        self.alterado.emit()
 
     def _salvar_filtro(self) -> None:
         try:
@@ -200,18 +251,77 @@ class MainViewModel(QObject):
         self._tarefas[thread] = tarefa
         thread.start()
 
-    def _validar_cert(self) -> bool:
-        try:
-            certificados.validar_para_uso()
-            return True
-        except RuntimeError as e:
-            self.erro.emit("Certificado", str(e))
-            return False
-
     @staticmethod
     def _pasta_salva() -> Path | None:
         salva = preferencias.carregar().pasta_download
         return Path(salva) if salva and Path(salva).is_dir() else None
+
+    def _copiar_local(self, origem: Path, pasta: Path, chave: str) -> bool:
+        if not origem.is_file():
+            self.erro.emit("Salvar XML", f"O arquivo não foi encontrado em:\n{origem}")
+            return False
+        try:
+            destino = caminho_livre(pasta, f"{chave}.xml")
+            shutil.copy2(origem, destino)
+        except OSError as e:
+            self.erro.emit("Salvar XML", f"Não foi possível salvar o arquivo:\n{e}")
+            return False
+        self._set_status(f"XML salvo em {destino}")
+        self.notificacao.emit("✓ XML salvo")
+        return True
+
+    # ---------- Certificados por empresa ----------
+    @staticmethod
+    def _padrao() -> str:
+        return preferencias.carregar().thumbprint.strip().upper()
+
+    def _indice_certs(self) -> dict | None:
+        """Lê os certificados do Windows uma vez. None = falha já mostrada ao usuário."""
+        try:
+            return {c.thumbprint: c for c in certificados.listar()}
+        except (certificados.ErroCertificados, OSError) as e:
+            self.erro.emit("Certificado", f"Não foi possível ler os certificados:\n{e}")
+            return None
+
+    def _thumb_da_empresa(self, e: repo.Empresa | None) -> str:
+        thumb = (e.thumbprint if e and e.thumbprint else "") or self._padrao()
+        return thumb.strip().replace(" ", "").upper()
+
+    def _avaliar_empresas(self, indice: dict) -> tuple[list[str], list[Resultado]]:
+        """Separa as empresas em (aptas, bloqueadas por certificado)."""
+        aptas, bloqueadas = [], []
+        for e in self._empresas:
+            problema = _problema_cert(self._thumb_da_empresa(e), indice)
+            if problema:
+                bloqueadas.append(Resultado(e.cnpj, status="erro", detalhe=problema.capitalize()))
+            else:
+                aptas.append(e.cnpj)
+        return aptas, bloqueadas
+
+    def _empresa_por_cnpj(self, cnpj: str) -> repo.Empresa | None:
+        return next((e for e in self._empresas if e.cnpj == cnpj), None)
+
+    def _empresa_da_nota(self, nota: dict) -> repo.Empresa | None:
+        cnpj = nota.get("empresa_cnpj")
+        if cnpj:
+            return self._empresa_por_cnpj(cnpj)
+        return self._empresas[0] if len(self._empresas) == 1 else None
+
+    def _validar_cert_empresa(self, empresa: repo.Empresa | None) -> bool:
+        indice = self._indice_certs()
+        if indice is None:
+            return False
+        problema = _problema_cert(self._thumb_da_empresa(empresa), indice)
+        if problema:
+            dono = (f"{empresa.razao_social or 'Empresa'} ({_fmt_cnpj(empresa.cnpj)})"
+                    if empresa else "Empresa da nota")
+            self.erro.emit("Certificado",
+                           f"{dono}: {problema}.\nAbra as Configurações e ajuste o certificado.")
+            return False
+        return True
+
+    def _validar_cert_nota(self, nota: dict) -> bool:
+        return self._validar_cert_empresa(self._empresa_da_nota(nota))
 
     # ---------- Consulta / filtros ----------
     def _consultar(self):
@@ -265,27 +375,58 @@ class MainViewModel(QObject):
     # ---------- Certificado ----------
     @Slot()
     def atualizarCertificado(self) -> None:
+        self._carregar_empresas()  # chamado ao salvar as Configurações
         try:
-            cert = certificados.selecionado()
+            indice = {c.thumbprint: c for c in certificados.listar()}
         except (RuntimeError, OSError, ValueError, KeyError):
-            cert = None
+            indice = {}
+
+        cert = indice.get(self._padrao())
         if cert is None:
             self._cert_texto, self._cert_alerta = "Certificado não configurado", True
         else:
             self._cert_texto = f"{cert.titular.split(':')[0]} · {cert.situacao} até {cert.validade:%d/%m/%Y}"
             self._cert_alerta = cert.dias_restantes <= certificados.AVISO_DIAS
-        self._carregar_empresas()  # chamado ao salvar as Configurações
+
+        # Certificados próprios das empresas: vencidos, ausentes ou perto de vencer
+        problemas = 0
+        for e in self._empresas:
+            thumb = self._thumb_da_empresa(e)
+            c = indice.get(thumb)
+            if _problema_cert(thumb, indice) or (c and c.dias_restantes <= certificados.AVISO_DIAS):
+                problemas += 1
+        if problemas:
+            self._cert_texto += f"  ·  {problemas} empresa(s) com problema"
+            self._cert_alerta = True
+
         self.recarregar()
         self.alterado.emit()
 
     # ---------- Sincronização ----------
     @Slot()
     def sincronizar(self) -> None:
-        if self._ocupado or limite.segundos_restantes() > 0 or not self._validar_cert():
+        if self._ocupado or limite.segundos_restantes() > 0:
             return
+        self._carregar_empresas()
+        if not self._empresas:
+            self._sync_ok([])
+            return
+
+        indice = self._indice_certs()
+        if indice is None:
+            return
+        aptas, bloqueadas = self._avaliar_empresas(indice)
+        if not aptas:
+            # Nada vai à SEFAZ, então o intervalo de 1h não é consumido.
+            self.erro.emit("Certificado",
+                           "Nenhuma empresa tem certificado válido:\n"
+                           + "\n".join(f"{_fmt_cnpj(r.cnpj)}: {r.detalhe}" for r in bloqueadas))
+            return
+
         limite.registrar_disparo()
         self._set_status("Sincronizando com a SEFAZ…", True)
-        self._executar(lambda: sincronizar_todas(Config()), self._sync_ok, self._sync_erro)
+        self._executar(lambda: _sincronizar_lista(aptas, bloqueadas),
+                       self._sync_ok, self._sync_erro)
 
     def _sync_ok(self, resultados) -> None:
         if not resultados:
@@ -318,7 +459,7 @@ class MainViewModel(QObject):
         self.recarregar()
         self.erro.emit("Sincronização", mensagem)
 
-    # ---------- XML ----------
+    # ---------- XML (lista) ----------
     @Slot(int)
     def acaoXml(self, linha: int) -> None:
         if self._ocupado or self._model.nota(linha) is None:
@@ -338,21 +479,10 @@ class MainViewModel(QObject):
         if nota is None:
             return
         if nota["xml_baixado"]:
-            origem = Path(nota["caminho_xml"] or "")
-            if not origem.is_file():
-                self.erro.emit("Salvar XML", f"O arquivo não foi encontrado em:\n{origem}")
-                return
-            try:
-                destino = caminho_livre(pasta, f"{nota['chave']}.xml")
-                shutil.copy2(origem, destino)
-            except OSError as e:
-                self.erro.emit("Salvar XML", f"Não foi possível salvar o arquivo:\n{e}")
-                return
-            self._set_status(f"XML salvo em {destino}")
-            self.notificacao.emit("✓ XML salvo")
+            self._copiar_local(Path(nota["caminho_xml"] or ""), pasta, nota["chave"])
             return
 
-        if not self._validar_cert():
+        if not self._validar_cert_nota(nota):
             return
         if nota["manifestacao"] != "ciencia":
             self.solicitarCiencia.emit(linha, str(pasta))
@@ -378,6 +508,97 @@ class MainViewModel(QObject):
         self._set_status("Falha ao baixar o XML", False)
         self.recarregar()
         self.erro.emit("Baixar XML", mensagem)
+
+    # ---------- XML por chave ----------
+    @Slot(str, result=str)
+    def analisarChave(self, texto: str) -> str:
+        """Valida enquanto digita/bipa. Retorna a chave normalizada (ou "")."""
+        texto = (texto or "").strip()
+        self._chave_info, self._chave_msg = None, ""
+        if texto:
+            chave = extrair_chave(texto)
+            if chave:
+                self._chave_info = analisar_chave(chave)
+                self._chave_msg = "✓  " + self._chave_info.resumo()
+            else:
+                try:
+                    analisar_chave(texto)
+                except ChaveInvalida as e:
+                    self._chave_msg = f"✕  {e}"
+        self.chaveChanged.emit()
+        return self._chave_info.chave if self._chave_info else ""
+
+    @Slot(str, result=bool)
+    def baixarChave(self, texto: str) -> bool:
+        if self._ocupado or not self.analisarChave(texto):
+            return False
+        chave = self._chave_info.chave
+        pasta = self._pasta_salva()
+        if pasta is None:
+            self.solicitarPastaChave.emit(chave)
+        else:
+            self._prosseguir_chave(chave, pasta)
+        return True
+
+    @Slot(str, str)
+    def continuarChaveComPasta(self, chave: str, url: str) -> None:
+        self._prosseguir_chave(chave, Path(QUrl(url).toLocalFile()))
+
+    def _prosseguir_chave(self, chave: str, pasta: Path) -> None:
+        try:
+            sit = situacao_chave(chave)
+        except Exception:  # noqa: BLE001 - sem banco, trata como nota nova
+            sit = None
+
+        if sit and sit["caminho"] and Path(sit["caminho"]).is_file():
+            if self._copiar_local(Path(sit["caminho"]), pasta, chave):
+                self._limpar_chave()
+            return
+
+        self._carregar_empresas()
+        if sit and sit["empresa_cnpj"]:
+            empresa = self._empresa_por_cnpj(sit["empresa_cnpj"])
+        elif self._empresa_filtro:
+            empresa = self._empresa_por_cnpj(self._empresa_filtro)
+        elif len(self._empresas) == 1:
+            empresa = self._empresas[0]
+        else:
+            empresa = None
+            self.erro.emit("Baixar por chave",
+                           "Nenhuma empresa cadastrada." if not self._empresas else
+                           "Selecione no seletor do topo qual empresa é a destinatária da nota.")
+            return
+        if empresa is None:
+            self.erro.emit("Baixar por chave", "A empresa desta nota não está ativa.")
+            return
+        if not self._validar_cert_empresa(empresa):
+            return
+
+        self._cnpj_da_chave[chave] = empresa.cnpj
+        if not (sit and sit["ciencia"]):
+            self.solicitarCienciaChave.emit(chave, str(pasta))
+            return
+        self._baixar_chave(chave, pasta)
+
+    @Slot(str, str)
+    def confirmarCienciaChave(self, chave: str, pasta: str) -> None:
+        if chave in self._cnpj_da_chave:
+            self._baixar_chave(chave, Path(pasta))
+
+    def _baixar_chave(self, chave: str, pasta: Path) -> None:
+        cnpj = self._cnpj_da_chave.pop(chave, "")
+        self._set_status("Baixando XML pela chave…", True)
+        self._executar(lambda: baixar_por_chave(chave, cnpj, pasta),
+                       self._chave_ok, self._download_erro)
+
+    def _chave_ok(self, destino: Path) -> None:
+        self._download_ok(destino)
+        self._limpar_chave()
+
+    def _limpar_chave(self) -> None:
+        self._chave_info, self._chave_msg = None, ""
+        self.chaveChanged.emit()
+        self.chaveConcluida.emit()
 
     # ---------- Janela ----------
     @Slot(result=bool)

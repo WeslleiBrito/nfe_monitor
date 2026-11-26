@@ -40,6 +40,12 @@ ApplicationWindow {
     function filtrar() {
         viewModel.aplicarFiltros(buscaInput.text, paraIso(deInput.text), paraIso(ateInput.text))
     }
+    function baixarChave() {
+        if (!viewModel.baixarChave(chaveInput.text)) {
+            chaveInput.selectAll()   // próxima leitura substitui a inválida
+            chaveInput.forceActiveFocus()
+        }
+    }
     function toast(msg) { toastBox.texto = msg; toastBox.opacity = 1; toastTimer.restart() }
 
     onClosing: (close) => {
@@ -225,8 +231,10 @@ ApplicationWindow {
     FolderDialog {
         id: pastaDialog
         property int linha: -1
+        property string chave: ""       // preenchida quando o download é por chave
         title: "Pasta para salvar o XML"
-        onAccepted: viewModel.continuarComPasta(linha, selectedFolder.toString())
+        onAccepted: chave ? viewModel.continuarChaveComPasta(chave, selectedFolder.toString())
+                          : viewModel.continuarComPasta(linha, selectedFolder.toString())
     }
 
     FolderDialog {
@@ -238,6 +246,7 @@ ApplicationWindow {
     Dialog {
         id: cienciaDialog
         property int linha: -1
+        property string chave: ""
         property string pasta: ""
         modal: true
         anchors.centerIn: parent
@@ -260,7 +269,14 @@ ApplicationWindow {
                 Layout.topMargin: 8
                 Item { Layout.fillWidth: true }
                 Btn { text: "Cancelar"; variante: "fantasma"; onClicked: cienciaDialog.close() }
-                Btn { text: "Registrar e baixar"; onClicked: { cienciaDialog.close(); viewModel.confirmarCiencia(cienciaDialog.linha, cienciaDialog.pasta) } }
+                Btn {
+                    text: "Registrar e baixar"
+                    onClicked: {
+                        cienciaDialog.close()
+                        if (cienciaDialog.chave) viewModel.confirmarCienciaChave(cienciaDialog.chave, cienciaDialog.pasta)
+                        else viewModel.confirmarCiencia(cienciaDialog.linha, cienciaDialog.pasta)
+                    }
+                }
             }
         }
     }
@@ -285,8 +301,11 @@ ApplicationWindow {
 
     Connections {
         target: viewModel
-        function onSolicitarPasta(linha) { pastaDialog.linha = linha; pastaDialog.open() }
-        function onSolicitarCiencia(linha, pasta) { cienciaDialog.linha = linha; cienciaDialog.pasta = pasta; cienciaDialog.open() }
+        function onSolicitarPasta(linha) { pastaDialog.chave = ""; pastaDialog.linha = linha; pastaDialog.open() }
+        function onSolicitarPastaChave(chave) { pastaDialog.linha = -1; pastaDialog.chave = chave; pastaDialog.open() }
+        function onSolicitarCiencia(linha, pasta) { cienciaDialog.chave = ""; cienciaDialog.linha = linha; cienciaDialog.pasta = pasta; cienciaDialog.open() }
+        function onSolicitarCienciaChave(chave, pasta) { cienciaDialog.linha = -1; cienciaDialog.chave = chave; cienciaDialog.pasta = pasta; cienciaDialog.open() }
+        function onChaveConcluida() { chaveInput.clear(); chaveInput.forceActiveFocus() }
         function onNotificacao(msg) { root.toast(msg) }
         function onErro(titulo, msg) { erroDialog.titulo = titulo; erroDialog.mensagem = msg; erroDialog.open() }
         function onEmpresasChanged() { empresaCombo.currentIndex = viewModel.empresaIndice }
@@ -443,8 +462,8 @@ ApplicationWindow {
                 Btn {
                     text: "Salvar"
                     enabled: !config.ocupado
+                    // O certificado é recarregado pelo sinal config.salvo (conectado no main.py)
                     onClicked: if (config.salvar(certCombo.currentValue || "", pastaConfig.text)) {
-                        viewModel.atualizarCertificado()
                         configDialog.close()
                         root.toast("✓ Configurações salvas")
                     }
@@ -596,6 +615,52 @@ ApplicationWindow {
                     icone: "⬇"
                     cor: Theme.t.status.alerta
                     progresso: viewModel.totalNotas > 0 ? viewModel.baixados / viewModel.totalNotas : 0
+                }
+            }
+
+            // Baixar por chave
+            Cartao {
+                Layout.fillWidth: true
+                implicitHeight: chaveCol.implicitHeight + 24
+                ColumnLayout {
+                    id: chaveCol
+                    anchors.fill: parent
+                    anchors.margins: 12
+                    spacing: 6
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Campo {
+                            id: chaveInput
+                            Layout.fillWidth: true
+                            icone: "⌗"
+                            font.family: Theme.t.fontes.mono
+                            placeholderText: "Colar ou bipar a chave de acesso (44 dígitos)…  (Ctrl+K)"
+                            onTextEdited: {
+                                const c = viewModel.analisarChave(text)
+                                if (c && c !== text) text = c   // extraiu a chave de um texto colado
+                            }
+                            onAccepted: root.baixarChave()
+                        }
+                        Btn {
+                            text: "⬇  Baixar pela chave"
+                            enabled: viewModel.chaveValida && !viewModel.ocupado
+                            onClicked: root.baixarChave()
+                        }
+                        Btn {
+                            text: "Limpar"; variante: "fantasma"; visible: chaveInput.text.length > 0
+                            onClicked: { chaveInput.clear(); viewModel.analisarChave("") }
+                        }
+                    }
+                    Txt {
+                        visible: viewModel.chavePrevia.length > 0
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 4
+                        text: viewModel.chavePrevia
+                        font.pixelSize: 13
+                        font.weight: 600
+                        color: viewModel.chaveValida ? Theme.t.status.sucesso : Theme.t.status.perigo
+                    }
                 }
             }
 
@@ -799,5 +864,6 @@ ApplicationWindow {
     }
 
     Shortcut { sequence: "Ctrl+F"; onActivated: buscaInput.forceActiveFocus() }
+    Shortcut { sequence: "Ctrl+K"; onActivated: { chaveInput.forceActiveFocus(); chaveInput.selectAll() } }
     Shortcut { sequence: "F5"; onActivated: if (viewModel.syncLiberado) viewModel.sincronizar() }
 }
